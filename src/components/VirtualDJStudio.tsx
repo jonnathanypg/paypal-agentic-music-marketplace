@@ -350,6 +350,15 @@ function DJJogWheel({
 }
 
 // ─── COMPONENTE PRINCIPAL VIRTUAL DJ STUDIO ──────────────────────────────────
+const BEAT_LOOP_PADS = [
+  { label: "1/4", durationSec: 0.25 },
+  { label: "1/2", durationSec: 0.5 },
+  { label: "1/1", durationSec: 1.0 },
+  { label: "2/2", durationSec: 2.0 },
+  { label: "4/4", durationSec: 4.0 },
+  { label: "8/8", durationSec: 8.0 },
+];
+
 export function VirtualDJStudio({
   catalog,
   onClose,
@@ -372,6 +381,13 @@ export function VirtualDJStudio({
     setDeckFilter,
     setCue,
     jumpToCue,
+    setBeatLoop,
+    clearLoop,
+    toggleReloop,
+    setLoopIn,
+    setLoopOut,
+    halveLoop,
+    doubleLoop,
     setCrossfader,
     smoothCrossfade,
     startScratch,
@@ -676,6 +692,15 @@ export function VirtualDJStudio({
               {/* Waveform Canvas */}
               <div className="w-full h-8 sm:h-10 bg-black/60 rounded-xl overflow-hidden border border-cyan-500/20 mb-2 relative">
                 <canvas ref={canvasRefA} width={400} height={40} className="w-full h-full" />
+                {deckA.loopActive && deckA.duration > 0 && (
+                  <div
+                    className="absolute top-0 bottom-0 bg-cyan-400/25 border-x border-cyan-300 pointer-events-none animate-pulse"
+                    style={{
+                      left: `${(deckA.loopStart / deckA.duration) * 100}%`,
+                      width: `${Math.max(1.5, ((deckA.loopEnd - deckA.loopStart) / deckA.duration) * 100)}%`,
+                    }}
+                  />
+                )}
                 {deckA.duration > 0 && (
                   <div
                     className="absolute top-0 bottom-0 w-0.5 bg-cyan-400 shadow-[0_0_8px_cyan]"
@@ -697,6 +722,79 @@ export function VirtualDJStudio({
               scratchMove={scratchMove}
               stopScratch={stopScratch}
             />
+
+            {/* Virtual DJ Beat-Loop & Loop Roll Pads (Deck A) */}
+            <div className="bg-black/45 border border-cyan-500/20 rounded-xl p-2 mb-1.5 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-black uppercase tracking-widest text-cyan-400 flex items-center gap-1">
+                  <span className={`w-1.5 h-1.5 rounded-full ${deckA.loopActive ? "bg-cyan-300 animate-ping" : "bg-cyan-500/40"}`} />
+                  BEAT LOOP / ROLL {deckA.loopActive && deckA.loopLabel ? `(${deckA.loopLabel})` : ""}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setLoopIn("A")}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-cyan-500/20 border border-white/10 text-[8px] font-mono font-bold text-cyan-300 transition-all"
+                    title="Marcar inicio de bucle (Loop In)"
+                  >
+                    IN
+                  </button>
+                  <button
+                    onClick={() => setLoopOut("A")}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-cyan-500/20 border border-white/10 text-[8px] font-mono font-bold text-cyan-300 transition-all"
+                    title="Marcar final y activar bucle (Loop Out)"
+                  >
+                    OUT
+                  </button>
+                  <button
+                    onClick={() => halveLoop("A")}
+                    disabled={!deckA.loopActive}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-cyan-500/20 disabled:opacity-30 border border-white/10 text-[8px] font-mono font-bold text-white transition-all"
+                    title="Dividir bucle a la mitad (÷2)"
+                  >
+                    ÷2
+                  </button>
+                  <button
+                    onClick={() => doubleLoop("A")}
+                    disabled={!deckA.loopActive}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-cyan-500/20 disabled:opacity-30 border border-white/10 text-[8px] font-mono font-bold text-white transition-all"
+                    title="Duplicar duración de bucle (×2)"
+                  >
+                    ×2
+                  </button>
+                  <button
+                    onClick={() => (deckA.loopActive ? clearLoop("A") : toggleReloop("A"))}
+                    className={`px-2 py-0.5 rounded text-[8px] font-mono font-black transition-all ${
+                      deckA.loopActive
+                        ? "bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.6)]"
+                        : "bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/25"
+                    }`}
+                    title={deckA.loopActive ? "Salir del bucle activo" : "Re-activar último bucle"}
+                  >
+                    {deckA.loopActive ? "EXIT" : "LOOP"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-6 gap-1">
+                {BEAT_LOOP_PADS.map((pad) => {
+                  const isActive = deckA.loopActive && deckA.loopLabel === pad.label;
+                  return (
+                    <button
+                      key={pad.label}
+                      onClick={() => setBeatLoop("A", pad.label, pad.durationSec)}
+                      className={`py-1.5 rounded-lg font-mono text-[10px] font-black transition-all border ${
+                        isActive
+                          ? "bg-cyan-400 text-black border-cyan-200 shadow-[0_0_14px_rgba(6,182,212,0.75)] scale-[1.03]"
+                          : "bg-cyan-950/40 hover:bg-cyan-500/20 text-cyan-300 border-cyan-500/25"
+                      }`}
+                      title={`Activar bucle rítmico ${pad.label} en Deck A`}
+                    >
+                      {pad.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
             {/* Deck Controls */}
             <div className="space-y-2 pt-1">
@@ -1013,6 +1111,15 @@ export function VirtualDJStudio({
               {/* Waveform Canvas */}
               <div className="w-full h-8 sm:h-10 bg-black/60 rounded-xl overflow-hidden border border-pink-500/20 mb-2 relative">
                 <canvas ref={canvasRefB} width={400} height={40} className="w-full h-full" />
+                {deckB.loopActive && deckB.duration > 0 && (
+                  <div
+                    className="absolute top-0 bottom-0 bg-pink-400/25 border-x border-pink-300 pointer-events-none animate-pulse"
+                    style={{
+                      left: `${(deckB.loopStart / deckB.duration) * 100}%`,
+                      width: `${Math.max(1.5, ((deckB.loopEnd - deckB.loopStart) / deckB.duration) * 100)}%`,
+                    }}
+                  />
+                )}
                 {deckB.duration > 0 && (
                   <div
                     className="absolute top-0 bottom-0 w-0.5 bg-pink-400 shadow-[0_0_8px_pink]"
@@ -1034,6 +1141,79 @@ export function VirtualDJStudio({
               scratchMove={scratchMove}
               stopScratch={stopScratch}
             />
+
+            {/* Virtual DJ Beat-Loop & Loop Roll Pads (Deck B) */}
+            <div className="bg-black/45 border border-pink-500/20 rounded-xl p-2 mb-1.5 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-black uppercase tracking-widest text-pink-400 flex items-center gap-1">
+                  <span className={`w-1.5 h-1.5 rounded-full ${deckB.loopActive ? "bg-pink-300 animate-ping" : "bg-pink-500/40"}`} />
+                  BEAT LOOP / ROLL {deckB.loopActive && deckB.loopLabel ? `(${deckB.loopLabel})` : ""}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setLoopIn("B")}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-pink-500/20 border border-white/10 text-[8px] font-mono font-bold text-pink-300 transition-all"
+                    title="Marcar inicio de bucle (Loop In)"
+                  >
+                    IN
+                  </button>
+                  <button
+                    onClick={() => setLoopOut("B")}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-pink-500/20 border border-white/10 text-[8px] font-mono font-bold text-pink-300 transition-all"
+                    title="Marcar final y activar bucle (Loop Out)"
+                  >
+                    OUT
+                  </button>
+                  <button
+                    onClick={() => halveLoop("B")}
+                    disabled={!deckB.loopActive}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-pink-500/20 disabled:opacity-30 border border-white/10 text-[8px] font-mono font-bold text-white transition-all"
+                    title="Dividir bucle a la mitad (÷2)"
+                  >
+                    ÷2
+                  </button>
+                  <button
+                    onClick={() => doubleLoop("B")}
+                    disabled={!deckB.loopActive}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-pink-500/20 disabled:opacity-30 border border-white/10 text-[8px] font-mono font-bold text-white transition-all"
+                    title="Duplicar duración de bucle (×2)"
+                  >
+                    ×2
+                  </button>
+                  <button
+                    onClick={() => (deckB.loopActive ? clearLoop("B") : toggleReloop("B"))}
+                    className={`px-2 py-0.5 rounded text-[8px] font-mono font-black transition-all ${
+                      deckB.loopActive
+                        ? "bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.6)]"
+                        : "bg-pink-500/15 border border-pink-500/30 text-pink-300 hover:bg-pink-500/25"
+                    }`}
+                    title={deckB.loopActive ? "Salir del bucle activo" : "Re-activar último bucle"}
+                  >
+                    {deckB.loopActive ? "EXIT" : "LOOP"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-6 gap-1">
+                {BEAT_LOOP_PADS.map((pad) => {
+                  const isActive = deckB.loopActive && deckB.loopLabel === pad.label;
+                  return (
+                    <button
+                      key={pad.label}
+                      onClick={() => setBeatLoop("B", pad.label, pad.durationSec)}
+                      className={`py-1.5 rounded-lg font-mono text-[10px] font-black transition-all border ${
+                        isActive
+                          ? "bg-pink-400 text-black border-pink-200 shadow-[0_0_14px_rgba(236,72,153,0.75)] scale-[1.03]"
+                          : "bg-pink-950/40 hover:bg-pink-500/20 text-pink-300 border-pink-500/25"
+                      }`}
+                      title={`Activar bucle rítmico ${pad.label} en Deck B`}
+                    >
+                      {pad.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
             {/* Deck Controls */}
             <div className="space-y-2 pt-1">

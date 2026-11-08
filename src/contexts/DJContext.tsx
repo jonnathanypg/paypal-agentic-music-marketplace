@@ -17,6 +17,9 @@ export interface DeckState {
   filter: number;        // -1 (Lowpass) to 0 (flat) to +1 (Highpass)
   loopActive: boolean;
   loopLength: number;    // beats or seconds
+  loopStart: number;     // start timestamp in seconds
+  loopEnd: number;       // end timestamp in seconds
+  loopLabel: string | null; // e.g., "1/4", "1/2", "1/1", "2/2", "4/4", "8/8", "MANUAL"
   cuePoint: number;
 }
 
@@ -46,6 +49,13 @@ export interface DJContextType {
   setDeckFilter: (deck: "A" | "B", val: number) => void;
   setCue: (deck: "A" | "B") => void;
   jumpToCue: (deck: "A" | "B") => void;
+  setBeatLoop: (deck: "A" | "B", label: string, durationSec: number) => void;
+  clearLoop: (deck: "A" | "B") => void;
+  toggleReloop: (deck: "A" | "B") => void;
+  setLoopIn: (deck: "A" | "B") => void;
+  setLoopOut: (deck: "A" | "B") => void;
+  halveLoop: (deck: "A" | "B") => void;
+  doubleLoop: (deck: "A" | "B") => void;
   setCrossfader: (val: number) => void;
   smoothCrossfade: (target: number, durationSec?: number) => void;
   startScratch: (deck: "A" | "B") => void;
@@ -82,6 +92,9 @@ const defaultDeckState = (track: Track | null = null): DeckState => ({
   filter: 0,
   loopActive: false,
   loopLength: 4,
+  loopStart: 0,
+  loopEnd: 0,
+  loopLabel: null,
   cuePoint: 0,
 });
 
@@ -120,24 +133,59 @@ export function DJProvider({ children }: { children: ReactNode }) {
   const delayNode = useRef<DelayNode | null>(null);
   const delayFeedback = useRef<GainNode | null>(null);
 
-  // Scratch Acoustic Synthesizer Refs
-  const scratchOscA = useRef<OscillatorNode | null>(null);
+  // Scratch Acoustic Engine Refs (Doppler Variable Delay + Vinyl Friction Noise Buffer)
+  const scratchDelayNodeA = useRef<DelayNode | null>(null);
+  const scratchNoiseSourceA = useRef<AudioBufferSourceNode | null>(null);
   const scratchFilterA = useRef<BiquadFilterNode | null>(null);
   const scratchGainA = useRef<GainNode | null>(null);
 
-  const scratchOscB = useRef<OscillatorNode | null>(null);
+  const scratchDelayNodeB = useRef<DelayNode | null>(null);
+  const scratchNoiseSourceB = useRef<AudioBufferSourceNode | null>(null);
   const scratchFilterB = useRef<BiquadFilterNode | null>(null);
   const scratchGainB = useRef<GainNode | null>(null);
 
   const isScratchingA = useRef(false);
   const wasPlayingBeforeScratchA = useRef(false);
+  const scratchAnchorTimeA = useRef(0);
+  const scratchDelayPosA = useRef(0.05);
+  const lastScratchSeekTimeA = useRef(0);
+
   const isScratchingB = useRef(false);
   const wasPlayingBeforeScratchB = useRef(false);
+  const scratchAnchorTimeB = useRef(0);
+  const scratchDelayPosB = useRef(0.05);
+  const lastScratchSeekTimeB = useRef(0);
+
+  // Refs for high-precision Beat-Loop watcher (15ms resolution)
+  const loopStateRefA = useRef<{ active: boolean; start: number; end: number }>({ active: false, start: 0, end: 0 });
+  const loopStateRefB = useRef<{ active: boolean; start: number; end: number }>({ active: false, start: 0, end: 0 });
 
   const isAudioSetup = useRef(false);
   const onTrackChangeListeners = useRef<Array<(track: Track) => void>>([]);
   const onDeckEndedListeners = useRef<Array<(deck: "A" | "B") => void>>([]);
   const lastDominantTrackId = useRef<number | string | null>(null);
+
+  // Create a realistic vinyl friction noise buffer (pink/brown noise + micro-crackle, no synth beep)
+  const createVinylNoiseBuffer = (ctx: AudioContext) => {
+    const bufferSize = ctx.sampleRate * 2;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+    for (let i = 0; i < bufferSize; i++) {
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.96900 * b2 + white * 0.1538520;
+      b3 = 0.86650 * b3 + white * 0.3104856;
+      b4 = 0.55000 * b4 + white * 0.5329522;
+      b5 = -0.7616 * b5 - white * 0.0168980;
+      // Periodic vinyl groove texture
+      const grooveMod = 0.65 + 0.35 * Math.sin(i * 0.018);
+      data[i] = ((b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.04) * grooveMod;
+      b6 = white * 0.115926;
+    }
+    return buffer;
+  };
 
   // Initialize Web Audio graph
   const setupWebAudio = useCallback(() => {
@@ -152,6 +200,8 @@ export function DJProvider({ children }: { children: ReactNode }) {
 
       const sourceA = ctx.createMediaElementSource(audioRefA.current);
       const sourceB = ctx.createMediaElementSource(audioRefB.current);
+
+      const vinylNoiseBuffer = createVinylNoiseBuffer(ctx);
 
       // Deck A EQ & Filter chain
       const lowA = ctx.createBiquadFilter();
@@ -174,6 +224,11 @@ export function DJProvider({ children }: { children: ReactNode }) {
       filtA.type = "allpass";
       filterNodeA.current = filtA;
 
+      // Inline Doppler Delay Node for Deck A (allows smooth forward/backward vinyl pitch-bending of real audio)
+      const scDelayA = ctx.createDelay(0.6);
+      scDelayA.delayTime.value = 0.05;
+      scratchDelayNodeA.current = scDelayA;
+
       const gA = ctx.createGain();
       gainNodeA.current = gA;
 
@@ -185,36 +240,37 @@ export function DJProvider({ children }: { children: ReactNode }) {
       anA.fftSize = 64;
       analyserA.current = anA;
 
-      // Connect Deck A
+      // Connect Deck A: source -> low -> mid -> high -> filt -> scDelay -> gain -> crossfader -> analyser -> destination
       sourceA.connect(lowA);
       lowA.connect(midA);
       midA.connect(highA);
       highA.connect(filtA);
-      filtA.connect(gA);
+      filtA.connect(scDelayA);
+      scDelayA.connect(gA);
       gA.connect(cfA);
       cfA.connect(anA);
       anA.connect(ctx.destination);
 
-      // Deck A Scratch Synthesizer Layer (Doppler + Needle Friction)
-      const scOscA = ctx.createOscillator();
-      scOscA.type = "sawtooth";
-      scOscA.frequency.value = 220;
-      scratchOscA.current = scOscA;
+      // Deck A Vinyl Friction Layer (Filtered Pink Noise - NO synthetic sawtooth oscillator)
+      const noiseA = ctx.createBufferSource();
+      noiseA.buffer = vinylNoiseBuffer;
+      noiseA.loop = true;
+      scratchNoiseSourceA.current = noiseA;
 
       const scFiltA = ctx.createBiquadFilter();
       scFiltA.type = "bandpass";
-      scFiltA.frequency.value = 1100;
-      scFiltA.Q.value = 3.5;
+      scFiltA.frequency.value = 950;
+      scFiltA.Q.value = 2.2;
       scratchFilterA.current = scFiltA;
 
       const scGainA = ctx.createGain();
       scGainA.gain.value = 0;
       scratchGainA.current = scGainA;
 
-      scOscA.connect(scFiltA);
+      noiseA.connect(scFiltA);
       scFiltA.connect(scGainA);
       scGainA.connect(cfA);
-      try { scOscA.start(); } catch (_) {}
+      try { noiseA.start(); } catch (_) {}
 
       // Deck B EQ & Filter chain
       const lowB = ctx.createBiquadFilter();
@@ -237,6 +293,11 @@ export function DJProvider({ children }: { children: ReactNode }) {
       filtB.type = "allpass";
       filterNodeB.current = filtB;
 
+      // Inline Doppler Delay Node for Deck B
+      const scDelayB = ctx.createDelay(0.6);
+      scDelayB.delayTime.value = 0.05;
+      scratchDelayNodeB.current = scDelayB;
+
       const gB = ctx.createGain();
       gainNodeB.current = gB;
 
@@ -248,36 +309,37 @@ export function DJProvider({ children }: { children: ReactNode }) {
       anB.fftSize = 64;
       analyserB.current = anB;
 
-      // Connect Deck B
+      // Connect Deck B: source -> low -> mid -> high -> filt -> scDelay -> gain -> crossfader -> analyser -> destination
       sourceB.connect(lowB);
       lowB.connect(midB);
       midB.connect(highB);
       highB.connect(filtB);
-      filtB.connect(gB);
+      filtB.connect(scDelayB);
+      scDelayB.connect(gB);
       gB.connect(cfB);
       cfB.connect(anB);
       anB.connect(ctx.destination);
 
-      // Deck B Scratch Synthesizer Layer
-      const scOscB = ctx.createOscillator();
-      scOscB.type = "sawtooth";
-      scOscB.frequency.value = 220;
-      scratchOscB.current = scOscB;
+      // Deck B Vinyl Friction Layer (Filtered Pink Noise)
+      const noiseB = ctx.createBufferSource();
+      noiseB.buffer = vinylNoiseBuffer;
+      noiseB.loop = true;
+      scratchNoiseSourceB.current = noiseB;
 
       const scFiltB = ctx.createBiquadFilter();
       scFiltB.type = "bandpass";
-      scFiltB.frequency.value = 1100;
-      scFiltB.Q.value = 3.5;
+      scFiltB.frequency.value = 950;
+      scFiltB.Q.value = 2.2;
       scratchFilterB.current = scFiltB;
 
       const scGainB = ctx.createGain();
       scGainB.gain.value = 0;
       scratchGainB.current = scGainB;
 
-      scOscB.connect(scFiltB);
+      noiseB.connect(scFiltB);
       scFiltB.connect(scGainB);
       scGainB.connect(cfB);
-      try { scOscB.start(); } catch (_) {}
+      try { noiseB.start(); } catch (_) {}
 
       isAudioSetup.current = true;
     } catch (err) {
@@ -390,19 +452,41 @@ export function DJProvider({ children }: { children: ReactNode }) {
     requestAnimationFrame(step);
   }, [crossfader, setCrossfader]);
 
-  // Scratch Interactions
+  // Scratch Interactions (Authentic Vinyl Doppler Delay + Pitch Bend + Filtered Vinyl Friction)
+  const setAudioPreservesPitch = (audioEl: HTMLAudioElement, preserve: boolean) => {
+    try {
+      (audioEl as any).preservesPitch = preserve;
+      (audioEl as any).mozPreservesPitch = preserve;
+      (audioEl as any).webkitPreservesPitch = preserve;
+    } catch (_) {}
+  };
+
   const startScratch = useCallback((deck: "A" | "B") => {
     setupWebAudio();
     resumeAudioContext();
     const audioEl = deck === "A" ? audioRefA.current : audioRefB.current;
     if (!audioEl) return;
 
+    // Disable pitch preservation during scratch so speed changes bend pitch like a real vinyl record!
+    setAudioPreservesPitch(audioEl, false);
+
     if (deck === "A") {
       isScratchingA.current = true;
       wasPlayingBeforeScratchA.current = !audioEl.paused;
+      scratchAnchorTimeA.current = audioEl.currentTime;
+      scratchDelayPosA.current = 0.05;
+      lastScratchSeekTimeA.current = performance.now();
     } else {
       isScratchingB.current = true;
       wasPlayingBeforeScratchB.current = !audioEl.paused;
+      scratchAnchorTimeB.current = audioEl.currentTime;
+      scratchDelayPosB.current = 0.05;
+      lastScratchSeekTimeB.current = performance.now();
+    }
+
+    // Ensure audio element is playing so the Web Audio DelayLine has live audio samples to bend
+    if (audioEl.paused) {
+      audioEl.play().catch(() => {});
     }
   }, [setupWebAudio, resumeAudioContext]);
 
@@ -413,39 +497,63 @@ export function DJProvider({ children }: { children: ReactNode }) {
 
     const ctx = audioContextRef.current;
     const now = ctx ? ctx.currentTime : 0;
+    const scDelay = deck === "A" ? scratchDelayNodeA.current : scratchDelayNodeB.current;
     const scGain = deck === "A" ? scratchGainA.current : scratchGainB.current;
     const scFilt = deck === "A" ? scratchFilterA.current : scratchFilterB.current;
-    const scOsc = deck === "A" ? scratchOscA.current : scratchOscB.current;
+    const delayPosRef = deck === "A" ? scratchDelayPosA : scratchDelayPosB;
+    const anchorRef = deck === "A" ? scratchAnchorTimeA : scratchAnchorTimeB;
+    const lastSeekRef = deck === "A" ? lastScratchSeekTimeA : lastScratchSeekTimeB;
 
     const speed = Math.abs(velocity);
 
-    // 1. Scrub through the song audio forward and backward in real time
-    if (audioEl.duration && audioEl.duration > 0) {
-      const stepSeconds = velocity * 0.18; // smooth scrub step
-      const nextTime = Math.max(0, Math.min(audioEl.duration - 0.1, audioEl.currentTime + stepSeconds));
-      audioEl.currentTime = nextTime;
+    // 1. Modulate Inline Doppler Delay Time for real-time forward & reverse vinyl pitch-bending of the song!
+    // Decreasing delayTime = higher/forward pitch; Increasing delayTime = lower/reverse pitch
+    if (ctx && scDelay) {
+      const delayStep = -velocity * 0.014;
+      let nextDelay = delayPosRef.current + delayStep;
+      // Softly wrap delay buffer within [0.006s, 0.24s] so continuous rotation keeps bending smoothly
+      if (nextDelay < 0.006) nextDelay = 0.14;
+      if (nextDelay > 0.24) nextDelay = 0.05;
+      delayPosRef.current = nextDelay;
+      scDelay.delayTime.setTargetAtTime(nextDelay, now, 0.014);
     }
 
-    // 2. Adjust playbackRate for forward acceleration vs backward scrub
-    if (velocity > 0.05) {
-      audioEl.playbackRate = Math.min(3.5, Math.max(0.3, speed * 1.5));
+    // 2. Real Vinyl Pitch-Bend on the Audio Element (with preservesPitch = false)
+    if (velocity > 0.04) {
+      // Forward scratch: accelerate/decelerate actual music pitch
+      const targetRate = Math.min(2.6, Math.max(0.28, 0.45 + speed * 1.15));
+      audioEl.playbackRate = targetRate;
       if (audioEl.paused) audioEl.play().catch(() => {});
-    } else if (velocity < -0.05) {
-      audioEl.playbackRate = 0.05; // tiny forward rate while rewinding currentTime
+    } else if (velocity < -0.04) {
+      // Reverse pull: low vinyl drag pitch while Doppler delay pulls backward
+      const targetRate = Math.min(1.4, Math.max(0.25, 0.32 + speed * 0.65));
+      audioEl.playbackRate = targetRate;
+      if (audioEl.paused) audioEl.play().catch(() => {});
     } else {
-      audioEl.playbackRate = 0.01;
+      // Hand holding the platter still
+      audioEl.playbackRate = 0.15;
     }
 
-    // 3. Modulate Scratch Acoustic Texture (Vinyl Doppler + Needle Grooves)
-    if (ctx && scGain && scFilt && scOsc) {
-      if (speed > 0.03) {
-        const pitchFreq = Math.max(80, Math.min(1500, 180 + velocity * 420));
-        const filterFreq = Math.max(400, Math.min(5800, 750 + speed * 2800));
-        const gainVal = Math.min(0.85, speed * 0.5);
+    // 3. Throttled Anchor Scrub (every ~140ms) so we never stutter the MP3 decoder on every mousemove frame
+    if (audioEl.duration && audioEl.duration > 0) {
+      anchorRef.current = Math.max(0, Math.min(audioEl.duration - 0.1, anchorRef.current + velocity * 0.035));
+      const perfNow = performance.now();
+      if (perfNow - lastSeekRef.current > 140) {
+        lastSeekRef.current = perfNow;
+        // Only seek if drifted significantly
+        if (Math.abs(audioEl.currentTime - anchorRef.current) > 0.35) {
+          audioEl.currentTime = anchorRef.current;
+        }
+      }
+    }
 
-        scOsc.frequency.setTargetAtTime(pitchFreq, now, 0.008);
-        scFilt.frequency.setTargetAtTime(filterFreq, now, 0.008);
-        scGain.gain.setTargetAtTime(gainVal, now, 0.008);
+    // 4. Subtle Vinyl Needle Friction Texture (Filtered Pink Noise, zero oscillator beep)
+    if (ctx && scGain && scFilt) {
+      if (speed > 0.04) {
+        const filterFreq = Math.max(380, Math.min(3400, 650 + speed * 1350));
+        const gainVal = Math.min(0.28, speed * 0.16);
+        scFilt.frequency.setTargetAtTime(filterFreq, now, 0.012);
+        scGain.gain.setTargetAtTime(gainVal, now, 0.012);
       } else {
         scGain.gain.setTargetAtTime(0, now, 0.02);
       }
@@ -457,9 +565,13 @@ export function DJProvider({ children }: { children: ReactNode }) {
     const ctx = audioContextRef.current;
     const now = ctx ? ctx.currentTime : 0;
     const scGain = deck === "A" ? scratchGainA.current : scratchGainB.current;
+    const scDelay = deck === "A" ? scratchDelayNodeA.current : scratchDelayNodeB.current;
 
     if (ctx && scGain) {
-      scGain.gain.setTargetAtTime(0, now, 0.03);
+      scGain.gain.setTargetAtTime(0, now, 0.025);
+    }
+    if (ctx && scDelay) {
+      scDelay.delayTime.setTargetAtTime(0.05, now, 0.04);
     }
 
     const wasPlaying = deck === "A" ? wasPlayingBeforeScratchA.current : wasPlayingBeforeScratchB.current;
@@ -469,14 +581,210 @@ export function DJProvider({ children }: { children: ReactNode }) {
     else isScratchingB.current = false;
 
     if (audioEl) {
+      setAudioPreservesPitch(audioEl, true);
       audioEl.playbackRate = pitch;
       if (wasPlaying) {
         audioEl.play().catch(() => {});
         if (deck === "A") setDeckA(prev => ({ ...prev, isPlaying: true }));
         else setDeckB(prev => ({ ...prev, isPlaying: true }));
+      } else {
+        audioEl.pause();
+        if (deck === "A") setDeckA(prev => ({ ...prev, isPlaying: false }));
+        else setDeckB(prev => ({ ...prev, isPlaying: false }));
       }
     }
   }, [deckA.pitch, deckB.pitch]);
+
+  // ── High-Precision Beat-Loop Watcher (15ms resolution for seamless 1/4, 1/2, 1/1, 2/2, 4/4, 8/8 loops) ──
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // Deck A Loop check
+      const loopA = loopStateRefA.current;
+      const elA = audioRefA.current;
+      if (loopA.active && elA && !elA.paused && !isScratchingA.current && loopA.end > loopA.start + 0.05) {
+        if (elA.currentTime >= loopA.end || elA.currentTime < loopA.start - 0.25) {
+          elA.currentTime = loopA.start;
+        }
+      }
+      // Deck B Loop check
+      const loopB = loopStateRefB.current;
+      const elB = audioRefB.current;
+      if (loopB.active && elB && !elB.paused && !isScratchingB.current && loopB.end > loopB.start + 0.05) {
+        if (elB.currentTime >= loopB.end || elB.currentTime < loopB.start - 0.25) {
+          elB.currentTime = loopB.start;
+        }
+      }
+    }, 15);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Activate or toggle a Beat-Loop pad ("1/4", "1/2", "1/1", "2/2", "4/4", "8/8")
+  const setBeatLoop = useCallback((deck: "A" | "B", label: string, durationSec: number) => {
+    const audioEl = deck === "A" ? audioRefA.current : audioRefB.current;
+    if (!audioEl) return;
+
+    const currentDeck = deck === "A" ? deckA : deckB;
+    // If clicking the already active loop pad, exit loop!
+    if (currentDeck.loopActive && currentDeck.loopLabel === label) {
+      if (deck === "A") {
+        loopStateRefA.current = { ...loopStateRefA.current, active: false };
+        setDeckA(prev => ({ ...prev, loopActive: false, loopLabel: null }));
+      } else {
+        loopStateRefB.current = { ...loopStateRefB.current, active: false };
+        setDeckB(prev => ({ ...prev, loopActive: false, loopLabel: null }));
+      }
+      return;
+    }
+
+    // Scale loop duration by current deck pitch/tempo
+    const scaledDuration = Math.max(0.12, durationSec / (currentDeck.pitch || 1));
+    // If a loop is already active, keep its loopStart anchor so switching 4/4 -> 2/2 -> 1/2 -> 1/4 feels like a real Pioneer CDJ Loop Roll build-up!
+    const startPos = currentDeck.loopActive ? currentDeck.loopStart : audioEl.currentTime;
+    const maxDur = audioEl.duration && audioEl.duration > 0 ? audioEl.duration - 0.05 : startPos + scaledDuration;
+    const endPos = Math.min(maxDur, startPos + scaledDuration);
+
+    if (deck === "A") {
+      loopStateRefA.current = { active: true, start: startPos, end: endPos };
+      setDeckA(prev => ({
+        ...prev,
+        loopActive: true,
+        loopLength: scaledDuration,
+        loopStart: startPos,
+        loopEnd: endPos,
+        loopLabel: label,
+      }));
+    } else {
+      loopStateRefB.current = { active: true, start: startPos, end: endPos };
+      setDeckB(prev => ({
+        ...prev,
+        loopActive: true,
+        loopLength: scaledDuration,
+        loopStart: startPos,
+        loopEnd: endPos,
+        loopLabel: label,
+      }));
+    }
+
+    if (audioEl.paused) {
+      audioEl.play().catch(() => {});
+      if (deck === "A") setDeckA(prev => ({ ...prev, isPlaying: true }));
+      else setDeckB(prev => ({ ...prev, isPlaying: true }));
+    }
+  }, [deckA, deckB]);
+
+  const clearLoop = useCallback((deck: "A" | "B") => {
+    if (deck === "A") {
+      loopStateRefA.current = { ...loopStateRefA.current, active: false };
+      setDeckA(prev => ({ ...prev, loopActive: false, loopLabel: null }));
+    } else {
+      loopStateRefB.current = { ...loopStateRefB.current, active: false };
+      setDeckB(prev => ({ ...prev, loopActive: false, loopLabel: null }));
+    }
+  }, []);
+
+  const toggleReloop = useCallback((deck: "A" | "B") => {
+    const audioEl = deck === "A" ? audioRefA.current : audioRefB.current;
+    const currentDeck = deck === "A" ? deckA : deckB;
+    if (!audioEl) return;
+
+    if (currentDeck.loopActive) {
+      clearLoop(deck);
+    } else if (currentDeck.loopEnd > currentDeck.loopStart + 0.08) {
+      audioEl.currentTime = currentDeck.loopStart;
+      if (deck === "A") {
+        loopStateRefA.current = { active: true, start: currentDeck.loopStart, end: currentDeck.loopEnd };
+        setDeckA(prev => ({ ...prev, loopActive: true, loopLabel: prev.loopLabel || "RELOOP" }));
+      } else {
+        loopStateRefB.current = { active: true, start: currentDeck.loopStart, end: currentDeck.loopEnd };
+        setDeckB(prev => ({ ...prev, loopActive: true, loopLabel: prev.loopLabel || "RELOOP" }));
+      }
+    } else {
+      // Default to 4/4 loop at current position
+      setBeatLoop(deck, "4/4", 2.0);
+    }
+  }, [deckA, deckB, clearLoop, setBeatLoop]);
+
+  const setLoopIn = useCallback((deck: "A" | "B") => {
+    const audioEl = deck === "A" ? audioRefA.current : audioRefB.current;
+    if (!audioEl) return;
+    const pos = audioEl.currentTime;
+    if (deck === "A") {
+      const nextEnd = deckA.loopEnd > pos + 0.1 ? deckA.loopEnd : pos + 2.0;
+      loopStateRefA.current = { ...loopStateRefA.current, start: pos, end: nextEnd };
+      setDeckA(prev => ({ ...prev, loopStart: pos, loopEnd: nextEnd }));
+    } else {
+      const nextEnd = deckB.loopEnd > pos + 0.1 ? deckB.loopEnd : pos + 2.0;
+      loopStateRefB.current = { ...loopStateRefB.current, start: pos, end: nextEnd };
+      setDeckB(prev => ({ ...prev, loopStart: pos, loopEnd: nextEnd }));
+    }
+  }, [deckA.loopEnd, deckB.loopEnd]);
+
+  const setLoopOut = useCallback((deck: "A" | "B") => {
+    const audioEl = deck === "A" ? audioRefA.current : audioRefB.current;
+    if (!audioEl) return;
+    const pos = audioEl.currentTime;
+    if (deck === "A") {
+      const start = deckA.loopStart < pos - 0.1 ? deckA.loopStart : Math.max(0, pos - 2.0);
+      loopStateRefA.current = { active: true, start, end: pos };
+      audioEl.currentTime = start;
+      setDeckA(prev => ({
+        ...prev,
+        loopStart: start,
+        loopEnd: pos,
+        loopLength: pos - start,
+        loopActive: true,
+        loopLabel: "MANUAL",
+      }));
+    } else {
+      const start = deckB.loopStart < pos - 0.1 ? deckB.loopStart : Math.max(0, pos - 2.0);
+      loopStateRefB.current = { active: true, start, end: pos };
+      audioEl.currentTime = start;
+      setDeckB(prev => ({
+        ...prev,
+        loopStart: start,
+        loopEnd: pos,
+        loopLength: pos - start,
+        loopActive: true,
+        loopLabel: "MANUAL",
+      }));
+    }
+  }, [deckA.loopStart, deckB.loopStart]);
+
+  const halveLoop = useCallback((deck: "A" | "B") => {
+    const currentDeck = deck === "A" ? deckA : deckB;
+    if (!currentDeck.loopActive) return;
+    const currentLen = currentDeck.loopEnd - currentDeck.loopStart;
+    const newLen = Math.max(0.12, currentLen / 2);
+    const newEnd = currentDeck.loopStart + newLen;
+    const labelMap: Record<string, string> = { "8/8": "4/4", "4/4": "2/2", "2/2": "1/1", "1/1": "1/2", "1/2": "1/4" };
+    const nextLabel = (currentDeck.loopLabel && labelMap[currentDeck.loopLabel]) || "÷2";
+    if (deck === "A") {
+      loopStateRefA.current = { active: true, start: currentDeck.loopStart, end: newEnd };
+      setDeckA(prev => ({ ...prev, loopEnd: newEnd, loopLength: newLen, loopLabel: nextLabel }));
+    } else {
+      loopStateRefB.current = { active: true, start: currentDeck.loopStart, end: newEnd };
+      setDeckB(prev => ({ ...prev, loopEnd: newEnd, loopLength: newLen, loopLabel: nextLabel }));
+    }
+  }, [deckA, deckB]);
+
+  const doubleLoop = useCallback((deck: "A" | "B") => {
+    const audioEl = deck === "A" ? audioRefA.current : audioRefB.current;
+    const currentDeck = deck === "A" ? deckA : deckB;
+    if (!currentDeck.loopActive) return;
+    const currentLen = currentDeck.loopEnd - currentDeck.loopStart;
+    const maxDur = audioEl?.duration || currentDeck.duration || 300;
+    const newLen = Math.min(16, currentLen * 2);
+    const newEnd = Math.min(maxDur - 0.05, currentDeck.loopStart + newLen);
+    const labelMap: Record<string, string> = { "1/4": "1/2", "1/2": "1/1", "1/1": "2/2", "2/2": "4/4", "4/4": "8/8" };
+    const nextLabel = (currentDeck.loopLabel && labelMap[currentDeck.loopLabel]) || "×2";
+    if (deck === "A") {
+      loopStateRefA.current = { active: true, start: currentDeck.loopStart, end: newEnd };
+      setDeckA(prev => ({ ...prev, loopEnd: newEnd, loopLength: newLen, loopLabel: nextLabel }));
+    } else {
+      loopStateRefB.current = { active: true, start: currentDeck.loopStart, end: newEnd };
+      setDeckB(prev => ({ ...prev, loopEnd: newEnd, loopLength: newLen, loopLabel: nextLabel }));
+    }
+  }, [deckA, deckB]);
 
   // Load track to Deck
   const loadTrackToDeck = useCallback((deck: "A" | "B", track: Track, autoPlay = false, startTime = 0) => {
@@ -496,20 +804,30 @@ export function DJProvider({ children }: { children: ReactNode }) {
     }
 
     if (deck === "A") {
+      loopStateRefA.current = { active: false, start: 0, end: 0 };
       setDeckA(prev => ({
         ...prev,
         track,
         isPlaying: autoPlay,
         currentTime: startTime,
-        cuePoint: startTime
+        cuePoint: startTime,
+        loopActive: false,
+        loopStart: 0,
+        loopEnd: 0,
+        loopLabel: null,
       }));
     } else {
+      loopStateRefB.current = { active: false, start: 0, end: 0 };
       setDeckB(prev => ({
         ...prev,
         track,
         isPlaying: autoPlay,
         currentTime: startTime,
-        cuePoint: startTime
+        cuePoint: startTime,
+        loopActive: false,
+        loopStart: 0,
+        loopEnd: 0,
+        loopLabel: null,
       }));
     }
 
@@ -759,6 +1077,13 @@ export function DJProvider({ children }: { children: ReactNode }) {
         setDeckFilter,
         setCue,
         jumpToCue,
+        setBeatLoop,
+        clearLoop,
+        toggleReloop,
+        setLoopIn,
+        setLoopOut,
+        halveLoop,
+        doubleLoop,
         setCrossfader,
         smoothCrossfade,
         startScratch,
