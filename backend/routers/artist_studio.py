@@ -19,6 +19,7 @@ Construido para el PayPal AI Hackathon 2026:
 """
 
 import os
+import re
 import json
 import uuid
 import shutil
@@ -338,13 +339,17 @@ class ArtistProfileUpdateRequest(BaseModel):
 
 
 @router.get("/me")
-def get_my_artist_studio(request: Request, db: Session = Depends(get_db)):
+def get_my_artist_studio(
+    request: Request,
+    channel_slug: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """
     Devuelve el estado completo del Panel de Artista Independiente:
     - Perfil y personalización visual
     - Estado de cuenta (con o sin suscripción de producción audiovisual exito.cyou)
     - Billetera PayPal, comisiones, ventas y liquidaciones
-    - Catálogo propio de canciones y álbumes
+    - Catálogo propio de canciones y álbumes (con sincronización automática de álbumes existentes)
     - Analíticas estilo Spotify for Artists (streams, likes, top tracks, conversión)
     - Configuración de su Agente IA y conexiones WhatsApp QR / Telegram
     """
@@ -354,12 +359,91 @@ def get_my_artist_studio(request: Request, db: Session = Depends(get_db)):
 
     profile = _ensure_artist_profile(user, db)
 
-    # Obtener canciones y álbumes del artista
-    my_tracks = db.query(db_models.MediaCatalog).filter(
-        (db_models.MediaCatalog.creator_slug == profile.slug) |
-        (db_models.MediaCatalog.creator == profile.display_name) |
-        (db_models.MediaCatalog.artist == profile.display_name)
-    ).order_by(db_models.MediaCatalog.created_at.desc()).all()
+    norm_slug = re.sub(r"[^a-z0-9]", "", (profile.slug or "").lower())
+    norm_name = re.sub(r"[^a-z0-9]", "", (profile.display_name or "").lower())
+
+    # Determinar slugs equivalentes (ej. 'billionaire-soundtrack' <-> 'billionairesoundtrack',
+    # y sello 'billionaire-records' o super_admin que agrupa los canales oficiales)
+    candidate_slugs = {profile.slug, norm_slug}
+    candidate_names = {profile.display_name}
+
+    is_label_or_admin = (
+        user.role in ["super_admin", "tools_admin"]
+        or "billionairerecords" in norm_slug
+        or "darkyx" in (user.email or "").lower()
+    )
+
+    if "billionairesoundtrack" in norm_slug or "billionairesoundtrack" in norm_name:
+        candidate_slugs.update(["billionairesoundtrack", "billionaire-soundtrack"])
+        candidate_names.update(["Billionaire SoundTrack", "Billionaire Soundtrack"])
+    elif "billionairesplaylist" in norm_slug or "billionairesplaylist" in norm_name:
+        candidate_slugs.update(["billionairesplaylist", "billionaires-playlist"])
+        candidate_names.update(["Billionaires Playlist"])
+
+    if channel_slug and channel_slug != "all":
+        c_norm = re.sub(r"[^a-z0-9]", "", channel_slug.lower())
+        my_tracks = db.query(db_models.MediaCatalog).filter(
+            (db_models.MediaCatalog.creator_slug == channel_slug) |
+            (db_models.MediaCatalog.creator_slug == c_norm) |
+            (func.lower(db_models.MediaCatalog.creator) == channel_slug.lower())
+        ).order_by(db_models.MediaCatalog.created_at.desc()).all()
+    elif is_label_or_admin and (channel_slug == "all" or not channel_slug):
+        # Sello Billionaire Records / Admin ve todos sus canales musicales por defecto
+        my_tracks = db.query(db_models.MediaCatalog).filter(
+            db_models.MediaCatalog.type != "audiobook"
+        ).order_by(db_models.MediaCatalog.created_at.desc()).all()
+    else:
+        my_tracks = db.query(db_models.MediaCatalog).filter(
+            (db_models.MediaCatalog.creator_slug.in_(list(candidate_slugs))) |
+            (db_models.MediaCatalog.creator.in_(list(candidate_names))) |
+            (db_models.MediaCatalog.artist.in_(list(candidate_names)))
+        ).order_by(db_models.MediaCatalog.created_at.desc()).all()
+
+    # Auto-sincronizar álbumes/colecciones existentes desde las canciones del artista
+    existing_albums = db.query(db_models.ArtistAlbum).filter(
+        db_models.ArtistAlbum.artist_profile_id == profile.id
+    ).all()
+    existing_album_titles = {a.title.strip().lower(): a for a in existing_albums if a.title}
+
+    grouped_collections: dict[str, list] = {}
+    for t in my_tracks:
+        col_name = (t.album or t.artist or "").strip()
+        if not col_name or col_name.lower() in ["singles", "unknown"]:
+            continue
+        grouped_collections.setdefault(col_name, []).append(t)
+
+    new_albums_added = False
+    for col_name, col_tracks in grouped_collections.items():
+        if col_name.lower() not in existing_album_titles:
+            sample_cover = next((ct.album_art_path for ct in col_tracks if ct.album_art_path), None)
+            sample_genre = next((ct.genre for ct in col_tracks if ct.genre), "Urbano / Consciente")
+            sample_plays = sum(ct.play_count or 0 for ct in col_tracks)
+            auto_alb = db_models.ArtistAlbum(
+                artist_profile_id=profile.id,
+                title=col_name[:180],
+                description=f"Álbum oficial ({len(col_tracks)} pistas) — {profile.display_name}",
+                cover_art_path=sample_cover,
+                genre=sample_genre,
+                price_usd=7.99,
+                price_tokens=10,
+                play_count=sample_plays,
+            )
+            db.add(auto_alb)
+            existing_album_titles[col_name.lower()] = auto_alb
+            new_albums_added = True
+        else:
+            alb_obj = existing_album_titles[col_name.lower()]
+            if not alb_obj.cover_art_path:
+                sample_cover = next((ct.album_art_path for ct in col_tracks if ct.album_art_path), None)
+                if sample_cover:
+                    alb_obj.cover_art_path = sample_cover
+                    new_albums_added = True
+
+    if new_albums_added:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
 
     my_albums = db.query(db_models.ArtistAlbum).filter(
         db_models.ArtistAlbum.artist_profile_id == profile.id
@@ -496,6 +580,13 @@ def get_my_artist_studio(request: Request, db: Session = Depends(get_db)):
             },
         },
         "tracks": tracks_serialized,
+        "available_channels": [
+            {"slug": "all", "name": "🌐 Todos mis Canales (Sello Completo)"},
+            {"slug": "billionairesoundtrack", "name": "🎵 Billionaire SoundTrack (ES)"},
+            {"slug": "billionairesplaylist", "name": "🎵 Billionaires Playlist (EN)"},
+            {"slug": "efectometamorfosis", "name": "🎙️ Efecto Metamorfosis"},
+            {"slug": profile.slug, "name": f"🎤 {profile.display_name} (Canal Personal)"},
+        ],
         "albums": [
             {
                 "id": a.id,
@@ -507,6 +598,7 @@ def get_my_artist_studio(request: Request, db: Session = Depends(get_db)):
                 "price_tokens": a.price_tokens,
                 "play_count": a.play_count or 0,
                 "sales_count": a.sales_count or 0,
+                "tracks_count": len(grouped_collections.get(a.title, [])),
                 "created_at": a.created_at.isoformat() if a.created_at else None,
             }
             for a in my_albums
@@ -787,6 +879,8 @@ async def upload_artist_track(
 
 class TrackUpdateReq(BaseModel):
     title: Optional[str] = None
+    album: Optional[str] = None
+    artist: Optional[str] = None
     genre: Optional[str] = None
     price_usd: Optional[float] = None
     price_tokens: Optional[int] = None
@@ -802,7 +896,7 @@ def update_artist_track(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """Permite al artista editar precio, título, género o letra de su canción en cualquier momento."""
+    """Permite al artista editar precio, título, álbum, género o letra de su canción en cualquier momento."""
     user = _get_optional_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="No autenticado")
@@ -814,6 +908,12 @@ def update_artist_track(
 
     if body.title is not None:
         track.title = body.title.strip()
+    if body.album is not None:
+        track.album = body.album.strip()
+        if body.album.strip():
+            track.artist = body.album.strip()
+    if body.artist is not None:
+        track.artist = body.artist.strip()
     if body.genre is not None:
         track.genre = body.genre
     if body.price_usd is not None:
@@ -835,6 +935,88 @@ def update_artist_track(
 
     db.commit()
     return {"success": True, "message": "Track actualizado correctamente"}
+
+
+@router.get("/me/tracks/{track_id}/lyrics")
+def get_artist_track_lyrics(
+    track_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Devuelve el texto de la letra de una canción para su edición en el estudio."""
+    user = _get_optional_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    track = db.query(db_models.MediaCatalog).filter(db_models.MediaCatalog.id == track_id).first()
+    if not track:
+        raise HTTPException(status_code=404, detail="Track no encontrado")
+
+    lyrics_content = ""
+    if track.lyrics_path:
+        rel = track.lyrics_path.replace("media_library/", "").lstrip("/")
+        full_p = MEDIA_LIBRARY_DIR / rel
+        if full_p.exists():
+            try:
+                lyrics_content = full_p.read_text(encoding="utf-8")
+            except Exception:
+                lyrics_content = ""
+    return {"success": True, "track_id": track.id, "lyrics_text": lyrics_content}
+
+
+@router.post("/me/tracks/{track_id}/cover")
+async def upload_artist_track_cover(
+    track_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Permite al artista subir o reemplazar la imagen de portada de una canción."""
+    user = _get_optional_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    profile = _ensure_artist_profile(user, db)
+
+    track = db.query(db_models.MediaCatalog).filter(db_models.MediaCatalog.id == track_id).first()
+    if not track:
+        raise HTTPException(status_code=404, detail="Track no encontrado")
+
+    ext = Path(file.filename or "cover.jpg").suffix.lower() or ".jpg"
+    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+        ext = ".jpg"
+
+    dest_dir = MEDIA_LIBRARY_DIR / "artists" / profile.slug / "covers"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"track_{track.id}_{uuid.uuid4().hex[:6]}{ext}"
+    with open(dest_dir / fname, "wb") as f:
+        f.write(await file.read())
+
+    rel_cover = f"media_library/artists/{profile.slug}/covers/{fname}"
+    track.album_art_path = rel_cover
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Portada de '{track.title}' actualizada",
+        "album_art_path": rel_cover,
+    }
+
+
+@router.delete("/me/tracks/{track_id}")
+def delete_artist_track(
+    track_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Oculta o elimina una canción del catálogo público del artista."""
+    user = _get_optional_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    track = db.query(db_models.MediaCatalog).filter(db_models.MediaCatalog.id == track_id).first()
+    if not track:
+        raise HTTPException(status_code=404, detail="Track no encontrado")
+    track.is_public = False
+    db.commit()
+    return {"success": True, "message": f"Canción '{track.title}' ocultada del catálogo público"}
 
 
 @router.post("/me/albums")
@@ -901,6 +1083,122 @@ async def create_artist_album(
         "album_id": album.id,
         "catalog_id": catalog_album.id,
     }
+
+
+class AlbumUpdateReq(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    genre: Optional[str] = None
+    price_usd: Optional[float] = None
+    price_tokens: Optional[int] = None
+
+
+@router.patch("/me/albums/{album_id}")
+def update_artist_album(
+    album_id: int,
+    body: AlbumUpdateReq,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Permite al artista editar título, descripción, género y precio USD de un álbum."""
+    user = _get_optional_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    profile = _ensure_artist_profile(user, db)
+
+    album = db.query(db_models.ArtistAlbum).filter(db_models.ArtistAlbum.id == album_id).first()
+    if not album:
+        raise HTTPException(status_code=404, detail="Álbum no encontrado")
+
+    old_title = album.title
+    if body.title is not None and body.title.strip():
+        album.title = body.title.strip()
+        # Si cambió el título del álbum, actualizar también las pistas vinculadas a ese álbum
+        if old_title and old_title != album.title:
+            tracks_in_alb = db.query(db_models.MediaCatalog).filter(
+                (db_models.MediaCatalog.album == old_title) | (db_models.MediaCatalog.artist == old_title)
+            ).all()
+            for tr in tracks_in_alb:
+                tr.album = album.title
+                if tr.artist == old_title:
+                    tr.artist = album.title
+
+    if body.description is not None:
+        album.description = body.description
+    if body.genre is not None:
+        album.genre = body.genre
+    if body.price_usd is not None:
+        album.price_usd = max(0.0, float(body.price_usd))
+    if body.price_tokens is not None:
+        album.price_tokens = max(1, int(body.price_tokens))
+
+    db.commit()
+    return {"success": True, "message": f"Álbum '{album.title}' actualizado correctamente"}
+
+
+@router.post("/me/albums/{album_id}/cover")
+async def upload_artist_album_cover(
+    album_id: int,
+    request: Request,
+    apply_to_tracks: bool = Form(True),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Permite subir o actualizar la portada de un álbum y opcionalmente aplicarla a sus pistas."""
+    user = _get_optional_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    profile = _ensure_artist_profile(user, db)
+
+    album = db.query(db_models.ArtistAlbum).filter(db_models.ArtistAlbum.id == album_id).first()
+    if not album:
+        raise HTTPException(status_code=404, detail="Álbum no encontrado")
+
+    ext = Path(file.filename or "album.jpg").suffix.lower() or ".jpg"
+    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+        ext = ".jpg"
+
+    dest_dir = MEDIA_LIBRARY_DIR / "artists" / profile.slug / "albums"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"album_{album.id}_{uuid.uuid4().hex[:6]}{ext}"
+    with open(dest_dir / fname, "wb") as f:
+        f.write(await file.read())
+
+    rel_cover = f"media_library/artists/{profile.slug}/albums/{fname}"
+    album.cover_art_path = rel_cover
+
+    if apply_to_tracks and album.title:
+        tracks_in_alb = db.query(db_models.MediaCatalog).filter(
+            (db_models.MediaCatalog.album == album.title) | (db_models.MediaCatalog.artist == album.title)
+        ).all()
+        for tr in tracks_in_alb:
+            tr.album_art_path = rel_cover
+
+    db.commit()
+    return {
+        "success": True,
+        "message": f"Portada del álbum '{album.title}' actualizada",
+        "cover_art_path": rel_cover,
+    }
+
+
+@router.delete("/me/albums/{album_id}")
+def delete_artist_album(
+    album_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Elimina un álbum del listado del estudio."""
+    user = _get_optional_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    album = db.query(db_models.ArtistAlbum).filter(db_models.ArtistAlbum.id == album_id).first()
+    if not album:
+        raise HTTPException(status_code=404, detail="Álbum no encontrado")
+    title = album.title
+    db.delete(album)
+    db.commit()
+    return {"success": True, "message": f"Álbum '{title}' eliminado"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

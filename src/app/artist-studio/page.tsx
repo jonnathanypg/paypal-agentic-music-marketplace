@@ -88,14 +88,54 @@ export default function ArtistStudioPage() {
   const [notifMessage, setNotifMessage] = useState("");
   const [convertAmount, setConvertAmount] = useState("5.00");
 
+  // ── Gestión Avanzada de Catálogo: Canal Activo, Sub-vistas, Búsqueda y Modales de Edición ──
+  const [selectedChannel, setSelectedChannel] = useState<string>("all");
+  const [catalogView, setCatalogView] = useState<"tracks" | "albums" | "upload">("tracks");
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [selectedAlbumFilter, setSelectedAlbumFilter] = useState<string>("all");
+  const [playingTrackId, setPlayingTrackId] = useState<number | null>(null);
+  const [audioPreviewEl, setAudioPreviewEl] = useState<HTMLAudioElement | null>(null);
+
+  // Modal Editar Canción
+  const [editingTrack, setEditingTrack] = useState<any | null>(null);
+  const [editTrackTitle, setEditTrackTitle] = useState("");
+  const [editTrackAlbum, setEditTrackAlbum] = useState("");
+  const [editTrackGenre, setEditTrackGenre] = useState("");
+  const [editTrackPriceUsd, setEditTrackPriceUsd] = useState("1.99");
+  const [editTrackLyrics, setEditTrackLyrics] = useState("");
+  const [editTrackCoverFile, setEditTrackCoverFile] = useState<File | null>(null);
+  const [savingTrackEdit, setSavingTrackEdit] = useState(false);
+
+  // Modal Editar Álbum
+  const [editingAlbum, setEditingAlbum] = useState<any | null>(null);
+  const [editAlbumTitle, setEditAlbumTitle] = useState("");
+  const [editAlbumDesc, setEditAlbumDesc] = useState("");
+  const [editAlbumGenre, setEditAlbumGenre] = useState("");
+  const [editAlbumPriceUsd, setEditAlbumPriceUsd] = useState("7.99");
+  const [editAlbumCoverFile, setEditAlbumCoverFile] = useState<File | null>(null);
+  const [applyAlbumCoverToTracks, setApplyAlbumCoverToTracks] = useState(true);
+  const [savingAlbumEdit, setSavingAlbumEdit] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+
+  const resolveMediaUrl = (path?: string | null) => {
+    if (!path) return "/icon.svg";
+    if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("/media-static/")) {
+      return path;
+    }
+    const clean = path.replace(/^media_library\//, "").replace(/^\/+/, "");
+    return `/media-static/${clean}`;
+  };
+
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 4500);
   };
 
-  const fetchStudio = useCallback(async () => {
+  const fetchStudio = useCallback(async (chSlug?: string) => {
     try {
-      const res = await fetch("/api/artist-studio/me");
+      const targetCh = chSlug ?? selectedChannel;
+      const q = targetCh ? `?channel_slug=${encodeURIComponent(targetCh)}` : "";
+      const res = await fetch(`/api/artist-studio/me${q}`);
       if (!res.ok) {
         setLoading(false);
         return;
@@ -129,11 +169,182 @@ export default function ArtistStudioPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedChannel]);
 
   useEffect(() => {
-    fetchStudio();
-  }, [fetchStudio]);
+    fetchStudio(selectedChannel);
+  }, [fetchStudio, selectedChannel]);
+
+  const handleUploadProfileImage = async (file: File, imageType: "avatar" | "banner") => {
+    setUploadingAvatar(true);
+    try {
+      const fd = new FormData();
+      fd.append("image_type", imageType);
+      fd.append("file", file);
+      const res = await fetch("/api/artist-studio/me/avatar", {
+        method: "POST",
+        body: fd,
+      });
+      const d = await res.json();
+      if (res.ok && d.success) {
+        showToast(imageType === "avatar" ? "✅ Foto de perfil de artista actualizada" : "✅ Portada/Banner del canal actualizado");
+        fetchStudio();
+      } else {
+        showToast(`⚠️ ${d.detail || "Error al subir imagen"}`);
+      }
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
+  const openEditTrackModal = async (t: any) => {
+    setEditingTrack(t);
+    setEditTrackTitle(t.title || "");
+    setEditTrackAlbum(t.album || t.artist || "");
+    setEditTrackGenre(t.genre || "");
+    setEditTrackPriceUsd(String(t.price_usd ?? 1.99));
+    setEditTrackLyrics("");
+    setEditTrackCoverFile(null);
+    try {
+      const res = await fetch(`/api/artist-studio/me/tracks/${t.id}/lyrics`);
+      if (res.ok) {
+        const d = await res.json();
+        setEditTrackLyrics(d.lyrics_text || "");
+      }
+    } catch {}
+  };
+
+  const handleSaveTrackEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingTrack) return;
+    setSavingTrackEdit(true);
+    try {
+      const res = await fetch(`/api/artist-studio/me/tracks/${editingTrack.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: editTrackTitle,
+          album: editTrackAlbum,
+          genre: editTrackGenre,
+          price_usd: parseFloat(editTrackPriceUsd || "1.99"),
+          lyrics_text: editTrackLyrics,
+        }),
+      });
+      if (editTrackCoverFile) {
+        const fd = new FormData();
+        fd.append("file", editTrackCoverFile);
+        await fetch(`/api/artist-studio/me/tracks/${editingTrack.id}/cover`, {
+          method: "POST",
+          body: fd,
+        });
+      }
+      if (res.ok) {
+        showToast(`✅ Canción '${editTrackTitle}' actualizada`);
+        setEditingTrack(null);
+        fetchStudio();
+      } else {
+        const d = await res.json();
+        showToast(`⚠️ ${d.detail || "No se pudo actualizar la canción"}`);
+      }
+    } finally {
+      setSavingTrackEdit(false);
+    }
+  };
+
+  const handleQuickTrackCoverUpload = async (trackId: number, file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/artist-studio/me/tracks/${trackId}/cover`, {
+      method: "POST",
+      body: fd,
+    });
+    if (res.ok) {
+      showToast("🖼️ Portada de la canción actualizada");
+      fetchStudio();
+    } else {
+      showToast("⚠️ Error actualizando portada");
+    }
+  };
+
+  const openEditAlbumModal = (alb: any) => {
+    setEditingAlbum(alb);
+    setEditAlbumTitle(alb.title || "");
+    setEditAlbumDesc(alb.description || "");
+    setEditAlbumGenre(alb.genre || "");
+    setEditAlbumPriceUsd(String(alb.price_usd ?? 7.99));
+    setEditAlbumCoverFile(null);
+    setApplyAlbumCoverToTracks(true);
+  };
+
+  const handleSaveAlbumEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingAlbum) return;
+    setSavingAlbumEdit(true);
+    try {
+      const res = await fetch(`/api/artist-studio/me/albums/${editingAlbum.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: editAlbumTitle,
+          description: editAlbumDesc,
+          genre: editAlbumGenre,
+          price_usd: parseFloat(editAlbumPriceUsd || "7.99"),
+        }),
+      });
+      if (editAlbumCoverFile) {
+        const fd = new FormData();
+        fd.append("apply_to_tracks", String(applyAlbumCoverToTracks));
+        fd.append("file", editAlbumCoverFile);
+        await fetch(`/api/artist-studio/me/albums/${editingAlbum.id}/cover`, {
+          method: "POST",
+          body: fd,
+        });
+      }
+      if (res.ok) {
+        showToast(`💿 Álbum '${editAlbumTitle}' actualizado`);
+        setEditingAlbum(null);
+        fetchStudio();
+      } else {
+        const d = await res.json();
+        showToast(`⚠️ ${d.detail || "No se pudo actualizar el álbum"}`);
+      }
+    } finally {
+      setSavingAlbumEdit(false);
+    }
+  };
+
+  const handleQuickAlbumCoverUpload = async (albumId: number, file: File) => {
+    const fd = new FormData();
+    fd.append("apply_to_tracks", "true");
+    fd.append("file", file);
+    const res = await fetch(`/api/artist-studio/me/albums/${albumId}/cover`, {
+      method: "POST",
+      body: fd,
+    });
+    if (res.ok) {
+      showToast("🖼️ Portada del álbum y sus canciones actualizada");
+      fetchStudio();
+    } else {
+      showToast("⚠️ Error actualizando portada del álbum");
+    }
+  };
+
+  const togglePlayPreview = (track: any) => {
+    if (playingTrackId === track.id && audioPreviewEl) {
+      audioPreviewEl.pause();
+      setPlayingTrackId(null);
+      return;
+    }
+    if (audioPreviewEl) {
+      audioPreviewEl.pause();
+    }
+    const url = resolveMediaUrl(track.file_path);
+    const audio = new Audio(url);
+    audio.onended = () => setPlayingTrackId(null);
+    audio.play().catch(() => {});
+    setAudioPreviewEl(audio);
+    setPlayingTrackId(track.id);
+  };
 
   const handleSaveProfile = async () => {
     setSaving(true);
@@ -379,24 +590,60 @@ export default function ArtistStudioPage() {
       {/* Top Navigation */}
       <header className="sticky top-0 z-30 backdrop-blur-xl bg-[#0b0818]/90 border-b border-white/10 px-6 py-4">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <Link href="/" className="flex items-center gap-2.5">
-              <ExitoLogoIcon size={36} />
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-lg tracking-tight">Éxito.cyou</span>
-                  <span className="text-[11px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500/20 to-purple-500/20 border border-amber-400/30 text-amber-300 font-semibold">
-                    Artist Studio & PayPal AI Marketplace
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-400">
-                  Canal público:{" "}
-                  <Link href={`/@${profile.slug || "billionairesoundtrack"}`} className="text-purple-400 hover:underline font-mono">
-                    exito.cyou/@{profile.slug || "artista"}
-                  </Link>
-                </p>
+          <div className="flex items-center gap-3.5">
+            {/* Avatar Interactivo del Artista con Subida Rápida */}
+            <label className="relative w-12 h-12 rounded-2xl overflow-hidden border-2 border-purple-500/50 cursor-pointer group shrink-0 bg-zinc-900">
+              <img
+                src={resolveMediaUrl(profile.avatar_url)}
+                alt={profile.display_name || "Artista"}
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 flex items-center justify-center text-[10px] font-bold text-center leading-tight transition">
+                📷 Foto
               </div>
-            </Link>
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleUploadProfileImage(f, "avatar");
+                }}
+              />
+            </label>
+
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <Link href="/" className="font-bold text-lg tracking-tight hover:text-purple-300 transition">
+                  {profile.display_name || "Éxito.cyou Studio"}
+                </Link>
+                <span className="text-[11px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500/20 to-purple-500/20 border border-amber-400/30 text-amber-300 font-semibold">
+                  Artist Studio & PayPal Marketplace
+                </span>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-zinc-400 mt-0.5 flex-wrap">
+                <span>
+                  Canal público:{" "}
+                  <Link href={`/channel/${profile.slug || "billionairesoundtrack"}`} className="text-purple-400 hover:underline font-mono">
+                    exito.cyou/channel/{profile.slug || "artista"}
+                  </Link>
+                </span>
+                {/* Selector de Canal / Catálogo */}
+                {studioData?.available_channels && (
+                  <select
+                    value={selectedChannel}
+                    onChange={(e) => setSelectedChannel(e.target.value)}
+                    className="bg-black/60 border border-purple-500/40 rounded-lg px-2.5 py-0.5 text-[11px] text-purple-200 font-semibold outline-none"
+                  >
+                    {studioData.available_channels.map((ch: any) => (
+                      <option key={ch.slug} value={ch.slug}>
+                        {ch.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
@@ -415,7 +662,7 @@ export default function ArtistStudioPage() {
             )}
 
             <Link
-              href={`/@${profile.slug || "billionairesoundtrack"}`}
+              href={`/channel/${profile.slug || "billionairesoundtrack"}`}
               className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-xs font-semibold transition"
             >
               Ver Mi Canal Público →
@@ -433,7 +680,7 @@ export default function ArtistStudioPage() {
         <div className="max-w-7xl mx-auto mt-4 flex gap-2 overflow-x-auto pb-1">
           {[
             { id: "overview", label: "📊 Estudio & Analítica (Spotify-Style)" },
-            { id: "catalog", label: "🎵 Subir MP3 / Álbumes / Letras" },
+            { id: "catalog", label: `🎵 Mi Catálogo (${tracks.length} Canciones / ${albums.length} Álbumes)` },
             { id: "paypal", label: "💳 PayPal Marketplace & Retiros Flexibles" },
             { id: "agent", label: "🤖 Agente IA + WhatsApp QR & Telegram" },
             { id: "community", label: "🗳️ Comunidad, Votaciones & Fans" },
@@ -471,13 +718,16 @@ export default function ArtistStudioPage() {
                 </p>
               </div>
 
-              <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10">
-                <p className="text-xs text-zinc-400 uppercase tracking-wider">Reproducciones (Streams)</p>
+              <div
+                onClick={() => { setActiveTab("catalog"); setCatalogView("tracks"); }}
+                className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-cyan-500/40 cursor-pointer transition"
+              >
+                <p className="text-xs text-zinc-400 uppercase tracking-wider">Reproducciones & Catálogo</p>
                 <p className="text-3xl font-extrabold text-cyan-400 mt-1">
                   {(analytics.total_streams || 0).toLocaleString()}
                 </p>
-                <p className="text-[11px] text-zinc-400 mt-2">
-                  En {analytics.total_tracks || 0} canciones y {analytics.total_albums || 0} álbumes
+                <p className="text-[11px] text-cyan-300 mt-2 underline">
+                  Ver y editar mis {analytics.total_tracks || 0} canciones y {analytics.total_albums || 0} álbumes →
                 </p>
               </div>
 
@@ -505,14 +755,22 @@ export default function ArtistStudioPage() {
             {/* Ranking de Canciones Favoritas + Perfil del Canal */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <h2 className="text-lg font-bold">🏆 Ranking de Audios Favoritos (Streams + Corazones)</h2>
-                  <button
-                    onClick={() => setActiveTab("catalog")}
-                    className="text-xs px-3 py-1.5 rounded-lg bg-purple-600/30 border border-purple-500/40 text-purple-200 hover:bg-purple-600/50"
-                  >
-                    + Subir Nuevo MP3
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => { setActiveTab("catalog"); setCatalogView("tracks"); }}
+                      className="text-xs px-3 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/30 font-semibold"
+                    >
+                      🎸 Ver Todas Mis Canciones ({tracks.length})
+                    </button>
+                    <button
+                      onClick={() => { setActiveTab("catalog"); setCatalogView("albums"); }}
+                      className="text-xs px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-200 hover:bg-amber-500/30 font-semibold"
+                    >
+                      💿 Ver Mis Álbumes ({albums.length})
+                    </button>
+                  </div>
                 </div>
 
                 {analytics.top_tracks_ranking?.length ? (
@@ -520,37 +778,92 @@ export default function ArtistStudioPage() {
                     {analytics.top_tracks_ranking.map((t: any, idx: number) => (
                       <div
                         key={t.id}
-                        className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/5 hover:border-purple-500/30 transition"
+                        className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/5 hover:border-purple-500/30 transition gap-3 flex-wrap"
                       >
-                        <div className="flex items-center gap-3">
-                          <span className="w-6 text-center font-bold text-sm text-purple-400">#{idx + 1}</span>
-                          <div>
-                            <p className="font-semibold text-sm text-white">{t.title}</p>
-                            <p className="text-xs text-zinc-400">
-                              {t.genre || "Single"} • Álbum: {t.album || "Single"}
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span className="w-5 text-center font-bold text-xs text-purple-400">#{idx + 1}</span>
+                          <img
+                            src={resolveMediaUrl(t.album_art_path)}
+                            alt={t.title}
+                            className="w-11 h-11 rounded-lg object-cover border border-white/10 shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <p className="font-semibold text-sm text-white truncate">{t.title}</p>
+                            <p className="text-xs text-zinc-400 truncate">
+                              {t.genre || "Single"} • Álbum: <span className="text-purple-300">{t.album || t.artist || "Single"}</span>
                             </p>
                           </div>
                         </div>
-                        <div className="flex items-center gap-5 text-xs">
-                          <span className="text-cyan-300 font-medium">▶ {t.play_count} streams</span>
-                          <span className="text-rose-400 font-medium">♥ {t.likes_count} likes</span>
+                        <div className="flex items-center gap-3 text-xs">
+                          <button
+                            onClick={() => togglePlayPreview(t)}
+                            className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white font-bold"
+                          >
+                            {playingTrackId === t.id ? "⏸ Pausar" : "▶ Oír"}
+                          </button>
+                          <span className="text-cyan-300 font-medium">▶ {t.play_count}</span>
+                          <span className="text-rose-400 font-medium">♥ {t.likes_count}</span>
                           <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-300 font-bold">
-                            ${Number(t.price_usd).toFixed(2)} USD
+                            ${Number(t.price_usd).toFixed(2)}
                           </span>
+                          <button
+                            onClick={() => openEditTrackModal(t)}
+                            className="px-2.5 py-1 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-400/30 text-purple-200 font-semibold"
+                          >
+                            ✏️ Editar
+                          </button>
                         </div>
                       </div>
                     ))}
                   </div>
                 ) : (
                   <p className="text-sm text-zinc-400 py-6 text-center">
-                    Aún no has subido canciones a tu canal. Ve a la pestaña <b>Subir MP3 / Álbumes</b> para publicar tu primer track.
+                    Aún no hay canciones en este filtro. Selecciona <b>🌐 Todos mis Canales</b> arriba o sube un nuevo MP3.
                   </p>
                 )}
               </div>
 
-              {/* Editor Rápido de Identidad del Canal */}
+              {/* Editor Rápido de Identidad e Imagen de Perfil del Artista */}
               <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
-                <h2 className="text-lg font-bold">🎨 Identidad del Canal de Artista</h2>
+                <h2 className="text-lg font-bold">🎨 Identidad & Foto de Perfil del Artista</h2>
+
+                {/* Previsualización y Subida de Foto de Perfil y Banner */}
+                <div className="p-3.5 rounded-2xl bg-black/40 border border-white/10 space-y-3">
+                  <div className="flex items-center gap-3.5">
+                    <img
+                      src={resolveMediaUrl(profile.avatar_url)}
+                      alt={displayName}
+                      className="w-16 h-16 rounded-2xl object-cover border-2 border-purple-500/50 shrink-0 bg-zinc-900"
+                    />
+                    <div className="space-y-1.5 flex-1">
+                      <label className="block w-full text-center py-1.5 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs cursor-pointer transition">
+                        {uploadingAvatar ? "Subiendo imagen..." : "📷 Cambiar Foto de Perfil"}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) handleUploadProfileImage(f, "avatar");
+                          }}
+                        />
+                      </label>
+                      <label className="block w-full text-center py-1.5 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-zinc-200 font-semibold text-[11px] cursor-pointer transition">
+                        🖼️ Cambiar Banner / Portada de Canal
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) handleUploadProfileImage(f, "banner");
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="space-y-3 text-xs">
                   <div>
                     <label className="text-zinc-400 block mb-1">Nombre Artístico / Sello Musical</label>
@@ -561,7 +874,7 @@ export default function ArtistStudioPage() {
                     />
                   </div>
                   <div>
-                    <label className="text-zinc-400 block mb-1">Slug URL (exito.cyou/@slug)</label>
+                    <label className="text-zinc-400 block mb-1">Slug URL (exito.cyou/channel/slug)</label>
                     <input
                       value={slug}
                       onChange={(e) => setSlug(e.target.value)}
@@ -599,175 +912,639 @@ export default function ArtistStudioPage() {
         )}
 
         {/* ══════════════════════════════════════════════════════════════════
-            TAB 2: SUBIDA DE CANCIONES MP3/WAV, LETRAS Y ÁLBUMES
+            TAB 2: GESTOR COMPLETO DE CATÁLOGO (CANCIONES, ÁLBUMES Y SUBIDAS)
            ══════════════════════════════════════════════════════════════════ */}
         {activeTab === "catalog" && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* Formulario Subir Track */}
-            <form onSubmit={handleUploadTrack} className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
-              <h2 className="text-lg font-bold">🎵 Subir Nuevo Audio (MP3 / WAV) + Letra</h2>
-              <p className="text-xs text-zinc-400">
-                Elige el precio de descarga directa en USD. Tus fans podrán escucharlo en streaming, mezclarlo en el Cloud DJ y comprarlo con PayPal para guardarlo en su dispositivo.
-              </p>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="text-zinc-400 block mb-1">Título de la Canción *</label>
-                  <input
-                    required
-                    value={trackTitle}
-                    onChange={(e) => setTrackTitle(e.target.value)}
-                    placeholder="Ej. Imperio Cuántico"
-                    className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
-                  />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Género Musical</label>
-                  <input
-                    value={trackGenre}
-                    onChange={(e) => setTrackGenre(e.target.value)}
-                    placeholder="Afrobeats / Rap / Deep House"
-                    className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
-                  />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Precio Venta PayPal (USD)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={trackPriceUsd}
-                    onChange={(e) => setTrackPriceUsd(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/40 border border-amber-500/40 text-amber-300 font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Nombre del Álbum (Opcional)</label>
-                  <input
-                    value={trackAlbumName}
-                    onChange={(e) => setTrackAlbumName(e.target.value)}
-                    placeholder="Ej. Códigos de Abundancia"
-                    className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
-                  />
-                </div>
+          <div className="space-y-6">
+            {/* Barra de Sub-navegación del Catálogo */}
+            <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-2xl bg-white/[0.03] border border-white/10">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => setCatalogView("tracks")}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    catalogView === "tracks"
+                      ? "bg-purple-600 text-white shadow-lg"
+                      : "bg-white/5 text-zinc-300 hover:bg-white/10"
+                  }`}
+                >
+                  🎸 Mis Canciones Subidas ({tracks.length})
+                </button>
+                <button
+                  onClick={() => setCatalogView("albums")}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    catalogView === "albums"
+                      ? "bg-amber-500 text-black shadow-lg"
+                      : "bg-white/5 text-zinc-300 hover:bg-white/10"
+                  }`}
+                >
+                  💿 Mis Álbumes & Portadas ({albums.length})
+                </button>
+                <button
+                  onClick={() => setCatalogView("upload")}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    catalogView === "upload"
+                      ? "bg-emerald-600 text-white shadow-lg"
+                      : "bg-white/5 text-zinc-300 hover:bg-white/10"
+                  }`}
+                >
+                  ➕ Subir Nuevo MP3 / Crear Álbum
+                </button>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="text-zinc-400 block mb-1">Archivo de Audio (MP3 / WAV) *</label>
+              {/* Buscador y Filtro por Álbum */}
+              {catalogView !== "upload" && (
+                <div className="flex items-center gap-2.5 flex-wrap">
                   <input
-                    type="file"
-                    accept=".mp3,.wav,.ogg,.m4a,.flac"
-                    onChange={(e) => setAudioFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-zinc-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-purple-600 file:text-white"
+                    value={catalogSearch}
+                    onChange={(e) => setCatalogSearch(e.target.value)}
+                    placeholder="🔍 Buscar canción o álbum..."
+                    className="px-3.5 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white w-56 outline-none focus:border-purple-400"
                   />
+                  {catalogView === "tracks" && (
+                    <select
+                      value={selectedAlbumFilter}
+                      onChange={(e) => setSelectedAlbumFilter(e.target.value)}
+                      className="px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-zinc-200 outline-none"
+                    >
+                      <option value="all">💿 Todos los Álbumes ({albums.length})</option>
+                      {albums.map((a: any) => (
+                        <option key={a.id} value={a.title}>
+                          {a.title} ({a.tracks_count || 0})
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
-                <div>
-                  <label className="text-zinc-400 block mb-1">Portada Personalizada (JPG / PNG)</label>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setCoverFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-zinc-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white"
-                  />
-                </div>
-              </div>
+              )}
+            </div>
 
-              <div className="text-xs">
-                <label className="text-zinc-400 block mb-1">Letra de la Canción (Sincronizada con el Reproductor y el Agente IA)</label>
-                <textarea
-                  rows={4}
-                  value={trackLyrics}
-                  onChange={(e) => setTrackLyrics(e.target.value)}
-                  placeholder="Pega aquí la letra completa de tu canción para que los fans la lean en tiempo real y tu Agente IA pueda explicar su significado..."
-                  className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={uploadingTrack}
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-bold text-sm shadow-lg"
-              >
-                {uploadingTrack ? "Subiendo y Publicando..." : "🚀 Publicar Canción en Mi Canal y Marketplace"}
-              </button>
-            </form>
-
-            {/* Formulario Crear Álbum Pack */}
-            <div className="space-y-6">
-              <form onSubmit={handleCreateAlbum} className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
-                <h2 className="text-lg font-bold">💿 Crear Álbum Completo (Venta por Pack)</h2>
-                <p className="text-xs text-zinc-400">
-                  Agrupa tus canciones y permite que tus seguidores compren el álbum entero por un valor preferencial vía PayPal.
-                </p>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            {/* ── VISTA 2A: LISTADO COMPLETO DE CANCIONES SUBIDAS CON EDICIÓN Y PORTADA ── */}
+            {catalogView === "tracks" && (
+              <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <div>
-                    <label className="text-zinc-400 block mb-1">Título del Álbum *</label>
-                    <input
-                      required
-                      value={albumTitle}
-                      onChange={(e) => setAlbumTitle(e.target.value)}
-                      placeholder="Ej. Frecuencia Millonaria Vol. 1"
+                    <h2 className="text-lg font-bold">🎸 Todas Mis Canciones Publicadas</h2>
+                    <p className="text-xs text-zinc-400">
+                      Haz clic en la portada de cualquier canción para cambiar su imagen, o en <b>✏️ Editar Canción / Letra / Precio</b> para personalizar sus datos.
+                    </p>
+                  </div>
+                  {selectedAlbumFilter !== "all" && (
+                    <button
+                      onClick={() => setSelectedAlbumFilter("all")}
+                      className="text-xs px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-zinc-200"
+                    >
+                      ✕ Quitar filtro de álbum: {selectedAlbumFilter}
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-2.5 max-h-[680px] overflow-y-auto pr-1">
+                  {tracks
+                    .filter((t: any) => {
+                      const matchesAlbum =
+                        selectedAlbumFilter === "all" ||
+                        (t.album || t.artist || "") === selectedAlbumFilter;
+                      const q = catalogSearch.trim().toLowerCase();
+                      const matchesSearch =
+                        !q ||
+                        (t.title || "").toLowerCase().includes(q) ||
+                        (t.album || t.artist || "").toLowerCase().includes(q) ||
+                        (t.genre || "").toLowerCase().includes(q);
+                      return matchesAlbum && matchesSearch;
+                    })
+                    .map((t: any) => (
+                      <div
+                        key={t.id}
+                        className="flex items-center justify-between p-3.5 rounded-2xl bg-black/40 border border-white/10 hover:border-purple-500/40 transition gap-4 flex-wrap"
+                      >
+                        <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                          {/* Portada con cambio en 1 clic */}
+                          <label className="relative w-14 h-14 rounded-xl overflow-hidden border border-white/15 cursor-pointer group shrink-0 bg-zinc-900">
+                            <img
+                              src={resolveMediaUrl(t.album_art_path)}
+                              alt={t.title}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-black/75 opacity-0 group-hover:opacity-100 flex items-center justify-center text-[10px] font-bold text-center text-white leading-tight p-1 transition">
+                              📷 Cambiar Portada
+                            </div>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                if (f) handleQuickTrackCoverUpload(t.id, f);
+                              }}
+                            />
+                          </label>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p className="font-bold text-sm text-white truncate">{t.title}</p>
+                              {t.lyrics_path && (
+                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                  📝 Con Letra
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-zinc-400 truncate mt-0.5">
+                              Álbum: <b className="text-zinc-200">{t.album || t.artist || "Singles"}</b> • Género:{" "}
+                              <span className="text-cyan-300">{t.genre || "Urbano"}</span>
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2.5 text-xs flex-wrap">
+                          <button
+                            onClick={() => togglePlayPreview(t)}
+                            className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white font-semibold"
+                          >
+                            {playingTrackId === t.id ? "⏸ Pausar" : "▶ Escuchar"}
+                          </button>
+
+                          <span className="px-2.5 py-1.5 rounded-xl bg-cyan-500/10 text-cyan-300 font-medium">
+                            ▶ {t.play_count || 0}
+                          </span>
+                          <span className="px-2.5 py-1.5 rounded-xl bg-rose-500/10 text-rose-300 font-medium">
+                            ♥ {t.likes_count || 0}
+                          </span>
+                          <span className="px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-300 font-extrabold">
+                            ${Number(t.price_usd || 0.99).toFixed(2)} USD
+                          </span>
+
+                          <button
+                            onClick={() => openEditTrackModal(t)}
+                            className="px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold shadow"
+                          >
+                            ✏️ Editar Canción / Letra / Precio
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── VISTA 2B: GRID DE ÁLBUMES CON EDICIÓN DE INFORMACIÓN Y PORTADA ── */}
+            {catalogView === "albums" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <h2 className="text-lg font-bold">💿 Mis Álbumes Publicados ({albums.length})</h2>
+                    <p className="text-xs text-zinc-400">
+                      Personaliza el título, descripción, precio por álbum completo en PayPal y actualiza la imagen de portada de cada álbum.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setCatalogView("upload")}
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs"
+                  >
+                    + Crear Nuevo Álbum
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                  {albums
+                    .filter((a: any) => {
+                      const q = catalogSearch.trim().toLowerCase();
+                      return (
+                        !q ||
+                        (a.title || "").toLowerCase().includes(q) ||
+                        (a.description || "").toLowerCase().includes(q)
+                      );
+                    })
+                    .map((a: any) => (
+                      <div
+                        key={a.id}
+                        className="rounded-2xl bg-white/[0.03] border border-white/10 overflow-hidden flex flex-col justify-between hover:border-amber-500/40 transition"
+                      >
+                        <div>
+                          <div className="relative h-48 w-full bg-zinc-900 group">
+                            <img
+                              src={resolveMediaUrl(a.cover_art_path)}
+                              alt={a.title}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute top-3 right-3 px-3 py-1 rounded-full bg-black/80 backdrop-blur-md border border-amber-400/40 text-amber-300 font-extrabold text-xs">
+                              ${Number(a.price_usd || 7.99).toFixed(2)} USD
+                            </div>
+                            <label className="absolute bottom-3 left-3 px-3 py-1.5 rounded-xl bg-black/80 hover:bg-purple-600 text-white text-xs font-bold cursor-pointer border border-white/20 transition">
+                              📷 Cambiar Portada del Álbum
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const f = e.target.files?.[0];
+                                  if (f) handleQuickAlbumCoverUpload(a.id, f);
+                                }}
+                              />
+                            </label>
+                          </div>
+
+                          <div className="p-4 space-y-1.5">
+                            <h3 className="font-bold text-base text-white truncate">{a.title}</h3>
+                            <p className="text-xs text-zinc-400 line-clamp-2">
+                              {a.description || "Álbum oficial disponible para streaming y descarga directa PayPal."}
+                            </p>
+                            <div className="flex items-center gap-3 text-[11px] text-zinc-400 pt-1">
+                              <span className="text-purple-300 font-semibold">
+                                🎵 {a.tracks_count || 0} canciones
+                              </span>
+                              <span>•</span>
+                              <span className="text-cyan-300">▶ {a.play_count || 0} streams</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-4 pt-0 flex items-center gap-2">
+                          <button
+                            onClick={() => openEditAlbumModal(a)}
+                            className="flex-1 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 font-bold text-xs transition"
+                          >
+                            ✏️ Editar Álbum & Portada
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedAlbumFilter(a.title);
+                              setCatalogView("tracks");
+                            }}
+                            className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-white font-semibold text-xs transition"
+                          >
+                            Ver Pistas →
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── VISTA 2C: FORMULARIOS PARA SUBIR NUEVO MP3/WAV O CREAR ÁLBUM ── */}
+            {catalogView === "upload" && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                {/* Formulario Subir Track */}
+                <form onSubmit={handleUploadTrack} className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
+                  <h2 className="text-lg font-bold">🎵 Subir Nuevo Audio (MP3 / WAV) + Letra</h2>
+                  <p className="text-xs text-zinc-400">
+                    Elige el precio de descarga directa en USD. Tus fans podrán escucharlo en streaming, mezclarlo en el Cloud DJ y comprarlo con PayPal para guardarlo en su dispositivo.
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Título de la Canción *</label>
+                      <input
+                        required
+                        value={trackTitle}
+                        onChange={(e) => setTrackTitle(e.target.value)}
+                        placeholder="Ej. Imperio Cuántico"
+                        className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Género Musical</label>
+                      <input
+                        value={trackGenre}
+                        onChange={(e) => setTrackGenre(e.target.value)}
+                        placeholder="Afrobeats / Rap / Deep House"
+                        className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Precio Venta PayPal (USD)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={trackPriceUsd}
+                        onChange={(e) => setTrackPriceUsd(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl bg-black/40 border border-amber-500/40 text-amber-300 font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Nombre del Álbum (Opcional)</label>
+                      <input
+                        value={trackAlbumName}
+                        onChange={(e) => setTrackAlbumName(e.target.value)}
+                        placeholder="Ej. Códigos de Abundancia"
+                        className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Archivo de Audio (MP3 / WAV) *</label>
+                      <input
+                        type="file"
+                        accept=".mp3,.wav,.ogg,.m4a,.flac"
+                        onChange={(e) => setAudioFile(e.target.files?.[0] || null)}
+                        className="w-full text-xs text-zinc-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-purple-600 file:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Portada Personalizada (JPG / PNG)</label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => setCoverFile(e.target.files?.[0] || null)}
+                        className="w-full text-xs text-zinc-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-xs">
+                    <label className="text-zinc-400 block mb-1">Letra de la Canción (Sincronizada con el Reproductor y el Agente IA)</label>
+                    <textarea
+                      rows={4}
+                      value={trackLyrics}
+                      onChange={(e) => setTrackLyrics(e.target.value)}
+                      placeholder="Pega aquí la letra completa de tu canción para que los fans la lean en tiempo real y tu Agente IA pueda explicar su significado..."
                       className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
                     />
                   </div>
-                  <div>
-                    <label className="text-zinc-400 block mb-1">Precio del Álbum Completo (USD)</label>
+
+                  <button
+                    type="submit"
+                    disabled={uploadingTrack}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-bold text-sm shadow-lg"
+                  >
+                    {uploadingTrack ? "Subiendo y Publicando..." : "🚀 Publicar Canción en Mi Canal y Marketplace"}
+                  </button>
+                </form>
+
+                {/* Formulario Crear Álbum Pack */}
+                <form onSubmit={handleCreateAlbum} className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
+                  <h2 className="text-lg font-bold">💿 Crear Álbum Completo (Venta por Pack)</h2>
+                  <p className="text-xs text-zinc-400">
+                    Agrupa tus canciones y permite que tus seguidores compren el álbum entero por un valor preferencial vía PayPal.
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Título del Álbum *</label>
+                      <input
+                        required
+                        value={albumTitle}
+                        onChange={(e) => setAlbumTitle(e.target.value)}
+                        placeholder="Ej. Frecuencia Millonaria Vol. 1"
+                        className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-zinc-400 block mb-1">Precio del Álbum Completo (USD)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={albumPriceUsd}
+                        onChange={(e) => setAlbumPriceUsd(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl bg-black/40 border border-amber-500/40 text-amber-300 font-bold"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-xs">
+                    <label className="text-zinc-400 block mb-1">Descripción / Concepto del Álbum</label>
+                    <textarea
+                      rows={3}
+                      value={albumDesc}
+                      onChange={(e) => setAlbumDesc(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
+                    />
+                  </div>
+
+                  <div className="text-xs">
+                    <label className="text-zinc-400 block mb-1">Portada Oficial del Álbum</label>
                     <input
-                      type="number"
-                      step="0.01"
-                      value={albumPriceUsd}
-                      onChange={(e) => setAlbumPriceUsd(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black/40 border border-amber-500/40 text-amber-300 font-bold"
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setAlbumCoverFile(e.target.files?.[0] || null)}
+                      className="w-full text-xs text-zinc-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-amber-600 file:text-white"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={creatingAlbum}
+                    className="w-full py-3 rounded-xl bg-amber-600 hover:bg-amber-500 font-bold text-sm text-white"
+                  >
+                    {creatingAlbum ? "Creando Álbum..." : "💿 Publicar Álbum Completo"}
+                  </button>
+                </form>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── MODAL EDITAR CANCIÓN (TÍTULO, ÁLBUM, PRECIO, PORTADA Y LETRA) ── */}
+        {editingTrack && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-[#100c22] border border-purple-500/40 rounded-3xl p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-bold text-white">✏️ Editar Canción, Portada & Letra</h3>
+                <button
+                  onClick={() => setEditingTrack(null)}
+                  className="text-zinc-400 hover:text-white text-lg px-2"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveTrackEdit} className="space-y-3.5 text-xs">
+                <div className="flex items-center gap-4 p-3 rounded-2xl bg-black/40 border border-white/10">
+                  <img
+                    src={resolveMediaUrl(editingTrack.album_art_path)}
+                    alt={editingTrack.title}
+                    className="w-16 h-16 rounded-xl object-cover border border-white/15 shrink-0"
+                  />
+                  <div className="flex-1">
+                    <label className="text-zinc-300 font-semibold block mb-1">
+                      Actualizar Imagen de Portada de la Canción
+                    </label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setEditTrackCoverFile(e.target.files?.[0] || null)}
+                      className="w-full text-xs text-zinc-300 file:mr-2 file:py-1 file:px-3 file:rounded-lg file:border-0 file:bg-purple-600 file:text-white"
                     />
                   </div>
                 </div>
 
-                <div className="text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Título de la Canción</label>
+                    <input
+                      required
+                      value={editTrackTitle}
+                      onChange={(e) => setEditTrackTitle(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Álbum / Colección</label>
+                    <input
+                      value={editTrackAlbum}
+                      onChange={(e) => setEditTrackAlbum(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Género Musical</label>
+                    <input
+                      value={editTrackGenre}
+                      onChange={(e) => setEditTrackGenre(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Precio Venta PayPal (USD)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={editTrackPriceUsd}
+                      onChange={(e) => setEditTrackPriceUsd(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-black/50 border border-amber-500/40 text-amber-300 font-bold"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-zinc-400 block mb-1">
+                    Letra de la Canción (Sincronizada con el Reproductor y el Agente IA)
+                  </label>
+                  <textarea
+                    rows={6}
+                    value={editTrackLyrics}
+                    onChange={(e) => setEditTrackLyrics(e.target.value)}
+                    placeholder="Escribe o edita aquí la letra de la canción..."
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-white font-mono text-xs"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingTrack(null)}
+                    className="px-4 py-2.5 rounded-xl bg-white/10 text-zinc-300 font-semibold"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingTrackEdit}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold shadow-lg"
+                  >
+                    {savingTrackEdit ? "Guardando..." : "💾 Guardar Cambios de la Canción"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* ── MODAL EDITAR ÁLBUM (TÍTULO, DESCRIPCIÓN, PRECIO Y PORTADA) ── */}
+        {editingAlbum && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-[#100c22] border border-amber-500/40 rounded-3xl p-6 space-y-4 shadow-2xl">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-bold text-white">💿 Editar Álbum & Imagen de Portada</h3>
+                <button
+                  onClick={() => setEditingAlbum(null)}
+                  className="text-zinc-400 hover:text-white text-lg px-2"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveAlbumEdit} className="space-y-3.5 text-xs">
+                <div className="flex items-center gap-4 p-3 rounded-2xl bg-black/40 border border-white/10">
+                  <img
+                    src={resolveMediaUrl(editingAlbum.cover_art_path)}
+                    alt={editingAlbum.title}
+                    className="w-20 h-20 rounded-xl object-cover border border-amber-500/40 shrink-0"
+                  />
+                  <div className="flex-1 space-y-2">
+                    <label className="text-zinc-200 font-semibold block">
+                      Subir Nueva Portada del Álbum
+                    </label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setEditAlbumCoverFile(e.target.files?.[0] || null)}
+                      className="w-full text-xs text-zinc-300 file:mr-2 file:py-1 file:px-3 file:rounded-lg file:border-0 file:bg-amber-500 file:text-black file:font-bold"
+                    />
+                    <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={applyAlbumCoverToTracks}
+                        onChange={(e) => setApplyAlbumCoverToTracks(e.target.checked)}
+                      />
+                      Aplicar también esta portada a las canciones de este álbum
+                    </label>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Título del Álbum</label>
+                    <input
+                      required
+                      value={editAlbumTitle}
+                      onChange={(e) => setEditAlbumTitle(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 block mb-1">Precio del Álbum en PayPal (USD)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={editAlbumPriceUsd}
+                      onChange={(e) => setEditAlbumPriceUsd(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-black/50 border border-amber-500/40 text-amber-300 font-bold"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-zinc-400 block mb-1">Género del Álbum</label>
+                  <input
+                    value={editAlbumGenre}
+                    onChange={(e) => setEditAlbumGenre(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-white"
+                  />
+                </div>
+
+                <div>
                   <label className="text-zinc-400 block mb-1">Descripción / Concepto del Álbum</label>
                   <textarea
-                    rows={2}
-                    value={albumDesc}
-                    onChange={(e) => setAlbumDesc(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-white"
+                    rows={3}
+                    value={editAlbumDesc}
+                    onChange={(e) => setEditAlbumDesc(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-white"
                   />
                 </div>
 
-                <div className="text-xs">
-                  <label className="text-zinc-400 block mb-1">Portada Oficial del Álbum</label>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setAlbumCoverFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-zinc-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-amber-600 file:text-white"
-                  />
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingAlbum(null)}
+                    className="px-4 py-2.5 rounded-xl bg-white/10 text-zinc-300 font-semibold"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingAlbumEdit}
+                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-extrabold shadow-lg"
+                  >
+                    {savingAlbumEdit ? "Guardando..." : "💾 Guardar Cambios del Álbum"}
+                  </button>
                 </div>
-
-                <button
-                  type="submit"
-                  disabled={creatingAlbum}
-                  className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 font-bold text-sm text-white"
-                >
-                  {creatingAlbum ? "Creando Álbum..." : "💿 Publicar Álbum Completo"}
-                </button>
               </form>
-
-              {/* Lista rápida de álbumes y tracks actuales */}
-              <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-3">
-                <h3 className="font-bold text-sm">Mis Álbumes Publicados ({albums.length})</h3>
-                {albums.map((a: any) => (
-                  <div key={a.id} className="flex items-center justify-between p-3 rounded-xl bg-black/30 border border-white/5 text-xs">
-                    <div>
-                      <p className="font-semibold text-white">{a.title}</p>
-                      <p className="text-zinc-400">{a.description}</p>
-                    </div>
-                    <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 font-bold">
-                      ${Number(a.price_usd).toFixed(2)} USD
-                    </span>
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         )}
