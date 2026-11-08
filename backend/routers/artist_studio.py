@@ -977,7 +977,7 @@ def convert_earnings_to_production_tokens(
     db: Session = Depends(get_db)
 ):
     """
-    Permite a los artistas que NO tienen suscripción en media.weblifetech.com usar el saldo
+    Permite a los artistas que NO tienen suscripción Pro en Exito.cyou usar el saldo
     ganado por sus ventas para comprar Tokens de Producción IA ($1 USD = 10 Tokens).
     """
     user = _get_optional_user(request, db)

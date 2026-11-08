@@ -780,13 +780,6 @@ export default function StreamPortal() {
           const finalCatalog = data.length > 0 ? data : MOCK_CATALOG;
           setCatalog(finalCatalog);
           setActiveSection("home"); // Asegurar que inicie en la sección de Inicio
-
-          // Auto-trigger batch cover assignment for items without covers
-          // Runs silently in background without blocking UI
-          const missingCovers = finalCatalog.filter((i: Track) => !i.album_art_path).length;
-          if (missingCovers > 0) {
-            setTimeout(() => triggerAutoCoverBatch(missingCovers), 3000);
-          }
         } else {
           setCatalog(MOCK_CATALOG);
         }
@@ -795,9 +788,16 @@ export default function StreamPortal() {
           const userData = await userRes.json();
           setUserInfo(userData);
           setCtxAuth(userData.authenticated);
-          setCtxAdmin(userData.authenticated && ["super_admin", "tools_admin"].includes(userData.user?.role || ""));
+          const isAdminUser = userData.authenticated && ["super_admin", "tools_admin"].includes(userData.user?.role || "");
+          setCtxAdmin(isAdminUser);
           if (userData.authenticated && userData.user?.tokens_balance >= 0) {
             setPaymentMethod("tokens");
+          }
+          // Solo sincronizar disco automáticamente cuando entra un administrador
+          if (isAdminUser) {
+            setTimeout(() => {
+              fetch("/api/ecommerce/catalog?scan=true").catch(() => {});
+            }, 3000);
           }
         }
       } catch {
@@ -805,11 +805,6 @@ export default function StreamPortal() {
       } finally {
         setLoading(false);
       }
-
-      // Escaneo y sincronización en background silencioso 2 segundos después
-      setTimeout(() => {
-        fetch("/api/ecommerce/catalog?scan=true").catch(() => {});
-      }, 2000);
     };
     fetchData();
   }, []);

@@ -257,6 +257,14 @@ def perform_scan(db: Session):
             rel_path = os.path.relpath(file_path, str(MEDIA_LIBRARY_DIR))
             full_rel_path = os.path.join("media_library", rel_path)
             
+            # Fast-path: si ya existe en el catálogo con creador e información asignada, saltar costoso LLM y Whisper
+            exists_fast = db.query(db_models.MediaCatalog).filter(
+                (db_models.MediaCatalog.file_path == file_path) |
+                (db_models.MediaCatalog.file_path == full_rel_path)
+            ).first()
+            if exists_fast and exists_fast.creator and exists_fast.creator_slug:
+                continue
+
             project_dir = os.path.dirname(os.path.dirname(file_path))
             project_name = os.path.basename(project_dir)
             artist = project_name.replace("_", " ")
@@ -524,7 +532,17 @@ def perform_scan(db: Session):
                     if updated:
                         db.commit()
 
+_LAST_SCAN_TS = 0.0
+_SCAN_IN_PROGRESS = False
+
 def _scan_catalog_task():
+    global _LAST_SCAN_TS, _SCAN_IN_PROGRESS
+    import time
+    now = time.time()
+    if _SCAN_IN_PROGRESS or (now - _LAST_SCAN_TS < 600):
+        return
+    _SCAN_IN_PROGRESS = True
+    _LAST_SCAN_TS = now
     from database import SessionLocal
     db = SessionLocal()
     try:
@@ -534,6 +552,7 @@ def _scan_catalog_task():
         logging.getLogger("uvicorn").error(f"Error scanning catalog in background: {e}")
     finally:
         db.close()
+        _SCAN_IN_PROGRESS = False
 
 @router.get("/catalog", response_model=List[CatalogItemResponse])
 def get_catalog(background_tasks: BackgroundTasks, type: Optional[str] = None, scan: bool = False, db: Session = Depends(get_db)):

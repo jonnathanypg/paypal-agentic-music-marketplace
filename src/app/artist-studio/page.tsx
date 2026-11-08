@@ -933,7 +933,7 @@ export default function ArtistStudioPage() {
               <div className="p-6 rounded-2xl bg-gradient-to-br from-purple-900/30 to-pink-900/20 border border-purple-500/30 space-y-4">
                 <h3 className="font-bold text-sm">⚡ Usar Saldo de Ventas para Comprar Tokens IA</h3>
                 <p className="text-xs text-zinc-300 leading-relaxed">
-                  ¿No tienes suscripción mensual en <b>media.weblifetech.com</b>? Usa directamente el saldo guardado de tus ventas para adquirir Tokens y generar nuevas pistas, portadas o videos con IA ($1 USD = 10 Tokens).
+                  ¿No tienes suscripción mensual Pro en <b>Exito.cyou</b>? Usa directamente el saldo guardado de tus ventas para adquirir Tokens y generar nuevas pistas, portadas o videos con IA ($1 USD = 10 Tokens).
                 </p>
                 <div className="flex gap-2">
                   <input
