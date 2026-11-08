@@ -1,0 +1,308 @@
+@import "tailwindcss";
+
+/* Fuentes propias del Timeline Studio (subtítulos), servidas localmente */
+@font-face {
+  font-family: "Anton";
+  src: url("/fonts/Anton-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "DejaVu Sans";
+  src: url("/fonts/DejaVuSans.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "DejaVu Sans";
+  src: url("/fonts/DejaVuSans-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "DejaVu Serif";
+  src: url("/fonts/DejaVuSerif.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "DejaVu Serif";
+  src: url("/fonts/DejaVuSerif-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "DejaVu Sans Mono";
+  src: url("/fonts/DejaVuSansMono.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "DejaVu Sans Mono";
+  src: url("/fonts/DejaVuSansMono-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MediaSuite 2.0 — Design System
+   Premium Dark Theme with Glassmorphism
+   ══════════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════
+   MediaSuite 2.0 — Design System
+   Premium Dark Theme with Glassmorphism
+   ────────────────────────────────────────────────────────────────
+   Subtítulos animados estilo CapCut (karaoke / popup / neón)
+   ══════════════════════════════════════════════════════════════ */
+
+/* Palabra pop-up grande: entra con rebote al activarse */
+@keyframes subPopIn {
+  0%   { transform: scale(0.6); opacity: 0; }
+  60%  { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.sub-pop-word {
+  animation: subPopIn 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Palabra karaoke: mini rebote al resaltarse */
+@keyframes subKaraokeBounce {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.16); }
+  100% { transform: scale(1.14); }
+}
+.sub-karaoke-bounce {
+  animation: subKaraokeBounce 0.14s ease-out;
+}
+
+@theme {
+  --color-bg-primary: #0a0a1a;
+  --color-bg-secondary: #0d0d1f;
+  --color-bg-card: rgba(16, 16, 42, 0.4);
+  --color-bg-hover: rgba(255, 255, 255, 0.04);
+
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-hover: rgba(255, 255, 255, 0.12);
+
+  --color-text-primary: #f0f0f5;
+  --color-text-secondary: rgba(240, 240, 245, 0.6);
+  --color-text-muted: rgba(240, 240, 245, 0.35);
+
+  --color-accent: #7c3aed;
+  --color-accent-hover: #9333ea;
+  --color-accent-glow: rgba(124, 58, 237, 0.15);
+  --color-cyan: #06b6d4;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+
+  --shadow-premium: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
+  --shadow-accent: 0 0 20px rgba(124, 58, 237, 0.15);
+}
+
+/* ── Base ── */
+html {
+  scroll-behavior: smooth;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-bg-primary);
+  background-image: 
+    radial-gradient(circle at 0% 0%, rgba(124, 58, 237, 0.05) 0%, transparent 40%),
+    radial-gradient(circle at 100% 100%, rgba(6, 182, 212, 0.05) 0%, transparent 40%);
+  color: var(--color-text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  min-h-screen: 100vh;
+}
+
+/* ── Glass Panel 2.0 ── */
+.glass-panel {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-premium);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.glass-panel:hover {
+  border-color: var(--color-border-hover);
+}
+
+/* ── Custom Utilities ── */
+.premium-gradient-text {
+  background: linear-gradient(135deg, #fff 0%, rgba(255, 255, 255, 0.5) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ── Scrollbar ── */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* ── Animations ── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 10px rgba(124, 58, 237, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(124, 58, 237, 0.4); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-slide-up {
+  animation: slide-up 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 3s ease-in-out infinite;
+}
+
+/* ── Forms ── */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: rgba(124, 58, 237, 0.5) !important;
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+button {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+button:active {
+  transform: scale(0.96);
+}
+
+/* ── Confetti ── */
+@keyframes confetti-fall {
+  0% { transform: translateY(0) rotate(0deg) scale(1); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg) scale(0.3); opacity: 0; }
+}
+
+.animate-confetti {
+  animation: confetti-fall 2s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+
+/* ── Scrollbar oculta para carruseles (Firefox) ── */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Snap scroll para carruseles ── */
+.snap-x {
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+.snap-start {
+  scroll-snap-align: start;
+}
+
+/* ── Responsive Helpers ── */
+@media (max-width: 768px) {
+  .glass-panel {
+    border-radius: var(--radius-md);
+  }
+}
+
+/* ── Marquee (Spotify-like scrolling text) ── */
+.marquee-wrap {
+  overflow: hidden;
+  white-space: nowrap;
+  width: 100%;
+  position: relative;
+  mask-image: linear-gradient(to right, transparent, white 8px, white 92%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, white 8px, white 92%, transparent);
+}
+
+/* Continuous news-ticker marquee — two copies inside for seamless loop */
+.marquee-inner {
+  display: inline-block;
+  animation: marquee-ticker 18s linear infinite;
+  white-space: nowrap;
+}
+
+/* Slower variant for channel/artist names */
+.marquee-inner-slow {
+  display: inline-block;
+  animation: marquee-ticker 26s linear infinite;
+  white-space: nowrap;
+}
+
+@keyframes marquee-ticker {
+  0%   { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(-50%, 0, 0); }
+}
+
+/* ── Carousel Fade Container ── */
+.carousel-fade-container {
+  position: relative;
+  width: 100%;
+}
+.carousel-fade-container::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 24px;
+  background: linear-gradient(to right, #0a0a1a 0%, transparent 100%);
+  z-index: 10;
+  pointer-events: none;
+}
+.carousel-fade-container::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 24px;
+  background: linear-gradient(to left, #0a0a1a 0%, transparent 100%);
+  z-index: 10;
+  pointer-events: none;
+}
+
+

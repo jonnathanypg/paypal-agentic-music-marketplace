@@ -1,0 +1,119 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Python & MediaSuite specific
+__pycache__/
+*.py[cod]
+*.class
+venv/
+.venv/
+backend/venv/
+
+# Databases
+*.sqlite3
+
+# Media Library & Output
+media_library/
+backend/media_library/
+remotion-out/
+
+# PM2 & Logs
+*.log
+.pm2/
+
+# Whisper models (descargados en VPS, no subir a git)
+backend/models/whisper/small/*.bin
+backend/models/whisper/small/*.json
+backend/models/whisper/small/model.*
+!backend/models/whisper/small/.gitkeep
+
+# Generated content & chapters
+chapters_salazar/
+backend/uploads/
+*.cube
+*.rdb
+*.rdb.bak
+
+# Binaries
+backend/bin/piper/
+
+# Referencia externa (nginx-rtmp-module + restreamer, solo consulta, no versionar)
+respaldo/
+
+# Text files (except requirements)
+*.txt
+!requirements.txt
+!**/requirements.txt
+!README.txt
+
+
+.agents/
+
+# Temporary patch & test files
+*.patch
+*.crt
+*.key
+generator-animation/src/*.backup*
+backend/models/whisper/models--*
+generator-animation/public/audio/*.wav
+generator-animation/build/
+
+# Media files and testing binaries
+*.mp4
+*.mp3
+*.wav
+*.ogg
+*.webm
+*.flac
+*.zip
+*.tar
+*.gz
+*.bin
+*.onnx
+*.pt
+*.pth
+*.db
+generator-animation/public/broll/
+archive_debug_tests/
+docs_archive/
+test_composite.py
+generator-animation/src/*.bak
