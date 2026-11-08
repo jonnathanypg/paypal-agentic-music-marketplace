@@ -6,7 +6,8 @@
 
 [![Live Demo](https://img.shields.io/badge/LIVE_DEMO-exito.cyou-0070ba?style=for-the-badge&logo=paypal&logoColor=white)](https://exito.cyou)
 [![Artist Studio](https://img.shields.io/badge/ARTIST_STUDIO-exito.cyou%2Fartist--studio-c9a84c?style=for-the-badge&logo=applemusic&logoColor=black)](https://exito.cyou/artist-studio)
-[![Deployment Status](https://img.shields.io/badge/Deployment-Production_Active-10b981?style=for-the-badge&logo=githubactions&logoColor=white)](https://exito.cyou)
+[![CI/CD & Live Deployment](https://github.com/jonnathanypg/paypal-agentic-music-marketplace/actions/workflows/deploy.yml/badge.svg)](https://github.com/jonnathanypg/paypal-agentic-music-marketplace/actions/workflows/deploy.yml)
+[![Deployment: Production](https://img.shields.io/badge/Deployment-Production_Active-10b981?style=for-the-badge&logo=githubactions&logoColor=white)](https://exito.cyou)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)](./LICENSE)
 
 [![PayPal API](https://img.shields.io/badge/PayPal_API-Orders_v2_%2B_Payouts_%2B_Identity-003087?style=flat-square&logo=paypal)](https://developer.paypal.com)
