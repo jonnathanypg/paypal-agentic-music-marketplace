@@ -275,7 +275,7 @@ def oauth_callback(
                     prof = db_models.ArtistProfile(
                         user_id=user.id,
                         slug=slug_cand,
-                        stage_name=stage_name,
+                        display_name=stage_name,
                         bio=bio[:500],
                         avatar_url=avatar,
                         paypal_email=email,

@@ -417,7 +417,7 @@ async def login_with_paypal_identity(
             prof = db_models.ArtistProfile(
                 user_id=user.id,
                 slug=slug_cand,
-                stage_name=display_name,
+                display_name=display_name,
                 bio=f"Canal oficial de {display_name} monetizado con PayPal Agentic Commerce.",
                 paypal_email=email,
                 paypal_merchant_id=(body.paypal_merchant_id or "").strip() or None,
@@ -430,7 +430,7 @@ async def login_with_paypal_identity(
             if body.paypal_merchant_id:
                 prof.paypal_merchant_id = body.paypal_merchant_id.strip()
             if body.stage_name:
-                prof.stage_name = body.stage_name.strip()
+                prof.display_name = body.stage_name.strip()
             prof.paypal_verified = True
             if body.payout_mode:
                 prof.payout_mode = body.payout_mode
