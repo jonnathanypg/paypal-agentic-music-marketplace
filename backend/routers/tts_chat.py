@@ -15,10 +15,20 @@ import logging
 import re
 import os
 import tempfile
-from fastapi import APIRouter, HTTPException, Response
+import time
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
+
+from lib.saori_copilot import (
+    artist_analysis_text,
+    build_account_context,
+    detect_navigation_intent,
+    fan_analysis_text,
+    music_only,
+    wants_account_analysis,
+)
 
 from lib.agent_context_resolver import (
     AgentContext,
@@ -169,8 +179,16 @@ def load_skill_file(file_path: str) -> str:
         return ""
 
 
+_CATALOG_CACHE: dict[str, Any] = {"data": None, "ts": 0.0}
+_CATALOG_TTL = 120.0  # segundos
+
+
 def get_full_catalog_from_db() -> list[dict]:
-    """Consulta el catálogo completo desde la base de datos."""
+    """Consulta el catálogo completo desde la base de datos (con caché TTL corta)."""
+    now = time.time()
+    cached = _CATALOG_CACHE.get("data")
+    if cached is not None and (now - _CATALOG_CACHE.get("ts", 0.0)) < _CATALOG_TTL:
+        return cached
     try:
         from database import SessionLocal
         from db_models import MediaCatalog
@@ -205,12 +223,14 @@ def get_full_catalog_from_db() -> list[dict]:
                     "stream_url": item.stream_url or "",
                     "duration_seconds": item.duration_seconds or 0,
                 })
+            _CATALOG_CACHE["data"] = result
+            _CATALOG_CACHE["ts"] = time.time()
             return result
         finally:
             db.close()
     except Exception as e:
         logger.error(f"No se pudo consultar DB: {e}")
-        return []
+        return _CATALOG_CACHE.get("data") or []
 
 
 def read_lyrics_content(lyrics_path: str, max_chars: int = 2000) -> str:
@@ -219,9 +239,57 @@ def read_lyrics_content(lyrics_path: str, max_chars: int = 2000) -> str:
         return ""
     try:
         # Rutas relativas → absolutas
+        # El archivo está en backend/routers/tts_chat.py, por eso
+        # dirname(__file__)         → backend/routers
+        # dirname(dirname(__file__)) → backend
+        # dirname(x3)               → MediaSuite (raíz del proyecto)
+        # Los lyrics_path en DB son relativos a la raíz del proyecto (ej: media_library/MusicPlaylist/...)
         if not os.path.isabs(lyrics_path):
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            lyrics_path = os.path.join(base_dir, lyrics_path)
+            # Raíz del proyecto MediaSuite (un nivel sobre backend/)
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            full_path = os.path.join(project_root, lyrics_path)
+            if os.path.exists(full_path):
+                lyrics_path = full_path
+            else:
+                # Fallback: intentar desde backend/ por compatibilidad
+                backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                lyrics_path = os.path.join(backend_dir, lyrics_path)
+
+        # Si la ruta apunta a un archivo stub (<200 bytes) o no existe, buscar el archivo con letra completa
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if not os.path.exists(lyrics_path) or (os.path.isfile(lyrics_path) and os.path.getsize(lyrics_path) < 200):
+            dir_name = os.path.dirname(lyrics_path)
+            base_name = os.path.basename(lyrics_path)
+            if os.path.exists(dir_name):
+                import re as _re
+                m = _re.match(r'^[12]_(?:[0-9]+_)?(.*)\.txt$', base_name)
+                if m:
+                    core_name = m.group(1).replace('_', ' ').lower().strip()
+                    candidates = []
+                    for f in os.listdir(dir_name):
+                        if not f.endswith('.txt'):
+                            continue
+                        fp = os.path.join(dir_name, f)
+                        try:
+                            sz = os.path.getsize(fp)
+                        except OSError:
+                            continue
+                        if sz < 200:
+                            continue
+                        fm = _re.match(r'^[12]_(?:[0-9]+_)?(.*)\.txt$', f)
+                        if fm:
+                            fcore = fm.group(1).replace('_', ' ').lower().strip()
+                            if core_name == fcore:
+                                candidates.append((10, sz, fp))
+                            elif core_name in fcore or fcore in core_name:
+                                candidates.append((5, sz, fp))
+                        else:
+                            fclean = f[:-4].replace('_', ' ').lower().strip()
+                            if core_name in fclean:
+                                candidates.append((3, sz, fp))
+                    if candidates:
+                        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                        lyrics_path = candidates[0][2]
 
         if os.path.exists(lyrics_path):
             with open(lyrics_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -229,6 +297,73 @@ def read_lyrics_content(lyrics_path: str, max_chars: int = 2000) -> str:
             return content.strip()
     except Exception as e:
         logger.debug(f"No se pudo leer letras: {e}")
+    return ""
+
+
+async def _call_chat_llm(
+    system_prompt: str,
+    user_message: str,
+    history: Optional[list] = None,
+    timeout: float = 14.0,
+) -> str:
+    """Invoca un LLM de baja latencia con cascada de proveedores.
+
+    Patrón reutilizado de aigovcorex/aikrofy: cliente nativo (sin langchain pesado),
+    timeout estricto por intento (asyncio.wait_for) y max_retries=0 para evitar
+    cuelgues. Cadena: Groq gpt-oss-120b (~0.4s) → OpenAI gpt-4o-mini (~1s) →
+    gpt-5-nano. Devuelve "" si ningún proveedor responde (el caller cae a heurísticas).
+    """
+    msgs: list[dict] = [{"role": "system", "content": system_prompt}]
+    if history:
+        for h in history[-6:]:
+            sender = (h.get("sender") or "user").lower()
+            role = "assistant" if sender in ("bot", "assistant", "saori", "agent") else "user"
+            txt = (h.get("text") or "").strip()
+            if txt:
+                msgs.append({"role": role, "content": txt})
+    msgs.append({"role": "user", "content": user_message})
+
+    from config import OPENAI_API_KEY, GROQ_API_KEY
+
+    async def _groq() -> str:
+        from groq import AsyncGroq
+        client = AsyncGroq(api_key=GROQ_API_KEY, timeout=timeout, max_retries=0)
+        r = await client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=msgs,
+            temperature=0.6,
+            max_tokens=800,
+        )
+        return (r.choices[0].message.content or "").strip()
+
+    async def _openai(model: str) -> str:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=timeout, max_retries=0)
+        kwargs: dict[str, Any] = {"model": model, "messages": msgs}
+        if model.startswith("gpt-5"):
+            kwargs["max_completion_tokens"] = 800
+        else:
+            kwargs["temperature"] = 0.6
+            kwargs["max_tokens"] = 800
+        r = await client.chat.completions.create(**kwargs)
+        return (r.choices[0].message.content or "").strip()
+
+    attempts: list[tuple[str, Any]] = []
+    if GROQ_API_KEY:
+        attempts.append(("groq/gpt-oss-120b", _groq))
+    if OPENAI_API_KEY:
+        attempts.append(("openai/gpt-4o-mini", lambda: _openai("gpt-4o-mini")))
+        attempts.append(("openai/gpt-5-nano", lambda: _openai("gpt-5-nano")))
+
+    for name, fn in attempts:
+        t0 = time.time()
+        try:
+            text = await asyncio.wait_for(fn(), timeout=timeout)
+            if text:
+                logger.info(f"Saori LLM {name} OK en {time.time() - t0:.2f}s")
+                return text
+        except Exception as e:
+            logger.warning(f"Saori LLM {name} falló en {time.time() - t0:.2f}s: {type(e).__name__}: {str(e)[:120]}")
     return ""
 
 
@@ -248,7 +383,7 @@ def fuzzy_search(query: str, catalog: list[dict], top_n: int = 5, threshold: flo
     """Wrapper retrocompatible — búsqueda global sin scope de creador."""
     dummy_ctx = AgentContext(scope="global", catalog_subset=catalog, global_catalog=catalog)
     return scoped_fuzzy_search(
-        query, catalog, dummy_ctx, top_n=top_n, threshold=threshold, read_lyrics_fn=read_lyrics_content
+        query, catalog, dummy_ctx, top_n=top_n, threshold=threshold, read_lyrics_fn=None
     )
 
 
@@ -263,15 +398,18 @@ class AgentChatRequest(BaseModel):
     current_path: Optional[str] = None      # ruta actual (/@slug o /channel/slug)
     creator_slug: Optional[str] = None
     creator_name: Optional[str] = None
-    creator_type: Optional[str] = None    # music | audiobook | documentary | educational
+    creator_type: Optional[str] = None    # music | documentary | educational
     creator_language: Optional[str] = None
-
+    # Contexto de copiloto (rol, página/módulo/sección y estado de UI)
+    user_role: Optional[str] = None        # artist | fan | guest
+    page_context: Optional[dict] = None    # {module, section, title, path}
+    ui_state: Optional[dict] = None        # estado de la interfaz (tab activo, filtros)
 
 
 # ─── Endpoint principal del agente ───────────────────────────────────────────
 
 @router.post("/agent-chat")
-async def agent_chat(req: AgentChatRequest):
+async def agent_chat(req: AgentChatRequest, request: Request):
     raw_message = req.message.strip()
     message_lower = raw_message.lower()
     current_track = req.current_track or {}
@@ -283,6 +421,34 @@ async def agent_chat(req: AgentChatRequest):
     catalog = get_full_catalog_from_db()
     if not catalog:
         catalog = req.catalog_context or []
+
+    # La plataforma es estrictamente musical: nunca exponer audiolibros a Saori.
+    catalog = music_only(catalog)
+
+    # ── Contexto de cuenta verificado (rol, cifras reales, página actual) ──
+    account: dict[str, Any] = {"role": "guest", "authenticated": False,
+                               "prompt_block": "", "page_line": "", "artist": {}, "fan": {}}
+    _acc_db = None
+    try:
+        from database import SessionLocal
+        _acc_db = SessionLocal()
+        account = build_account_context(
+            request,
+            _acc_db,
+            page_context=req.page_context,
+            role_hint=req.user_role,
+        )
+    except Exception as acc_err:
+        logger.warning(f"No se pudo construir contexto de cuenta para Saori: {acc_err}")
+    finally:
+        if _acc_db is not None:
+            try:
+                _acc_db.close()
+            except Exception:
+                pass
+
+    account_role = account.get("role") or "guest"
+    page_line = account.get("page_line") or ""
 
     # ── Resolver contexto de creador y scope de búsqueda ──
     ctx = resolve_agent_context(
@@ -312,28 +478,102 @@ async def agent_chat(req: AgentChatRequest):
     greet_kw = ["hola", "hi", "hello", "buenas", "buenos", "hey", "saludo"]
     help_kw = ["ayuda", "help", "qué puedes", "que puedes"]
 
-    is_play_intent = any(k in message_lower for k in play_kw)
+    # Versión sin acentos ni signos para detección robusta de intención
+    # (ej: "explícame" → "explicame", "recomiéndame" → "recomiendame")
+    message_norm = normalize(raw_message)
+
+    is_play_intent = any(k in message_lower for k in play_kw) or any(k in message_norm for k in play_kw)
     is_buy_intent = any(k in message_lower for k in buy_kw)
     is_filter_intent = any(k in message_lower for k in filter_kw) and not is_play_intent
     is_search_intent = any(k in message_lower for k in search_kw) and not is_play_intent
-    is_lyrics_intent = any(k in message_lower for k in lyrics_kw)
-    is_meaning_intent = any(k in message_lower for k in meaning_kw)
-    is_greet = any(k in message_lower for k in greet_kw) and len(raw_message) < 30
-    is_help = any(k in message_lower for k in help_kw) and not is_play_intent
-    is_recommend_intent = any(k in message_lower for k in ["recomiend", "sugiere", "sugerencia", "sugerime", "recomiéndame", "recomiendame", "me recomiendas", "que me recomiendes", "que me guste", "para mi", "algo bueno", "que valga la pena"])
+    is_lyrics_intent = any(k in message_norm for k in lyrics_kw)
+    is_meaning_intent = any(k in message_norm for k in meaning_kw)
+    is_greet = any(k in message_norm for k in greet_kw) and len(raw_message) < 30
+    is_help = any(k in message_norm for k in help_kw) and not is_play_intent
+    is_recommend_intent = any(k in message_norm for k in ["recomiend", "sugiere", "sugerencia", "sugerime", "me recomiendas", "que me recomiendes", "que me guste", "para mi", "algo bueno", "que valga la pena", "algo que escuchar", "que puedo escuchar", "ponme algo"])
     is_recommendation_pick = False  # se activa cuando best_match se asigna por recomendación, no por título
     
     dj_kw = ["dj", "stream dj", "deck", "plato", "crossfade", "mezcla", "mezclar", "autodj", "auto-dj", "fade", "ecualiza", "graves", "agudos", "pitch", "cue"]
     is_dj_intent = any(k in message_lower for k in dj_kw)
 
+    # Defaults seguros: se recalculan en el resolvedor agéntico cuando aplica.
+    # Evita NameError si el mensaje es muy corto y no entra en ese bloque.
+    target_lang: Optional[str] = None
+    target_genre: Optional[str] = None
+    target_version: Optional[str] = None
+
+    # ── Copiloto de cuenta: análisis preciso y navegación determinista ──
+    # Se resuelve antes de la búsqueda difusa para evitar respuestas genéricas
+    # o alucinaciones cuando el usuario pregunta por su cuenta o pide abrir algo.
+    if account_role in ("artist", "fan") and wants_account_analysis(raw_message):
+        if account_role == "artist":
+            response_text = artist_analysis_text(account.get("artist") or {})
+        else:
+            response_text = fan_analysis_text(account.get("fan") or {})
+        nav = detect_navigation_intent(raw_message, account_role) or {}
+        return JSONResponse({
+            "response": response_text,
+            "action": "navigate" if nav.get("path") else None,
+            "action_data": nav if nav.get("path") else {},
+            "account_role": account_role,
+            "catalog_size": len(catalog),
+        })
+
+    nav_intent = detect_navigation_intent(raw_message, account_role)
+    if nav_intent and not is_play_intent:
+        path = nav_intent.get("path") or ""
+        section = nav_intent.get("section") or ""
+        artist_facts = account.get("artist") or {}
+        if account_role == "artist" and not path and artist_facts.get("slug"):
+            path = f"/channel/{artist_facts['slug']}"
+            response_text = (
+                f"Abriendo tu canal público en {path}. Desde ahí puedes compartir tu música "
+                f"y tu enlace de venta directo por PayPal."
+            )
+        elif section:
+            label = {
+                "overview": "Estudio & Analítica",
+                "catalog": "Mi Catálogo",
+                "paypal": "PayPal Marketplace & Retiros",
+                "agent": "Agente IA + WhatsApp & Telegram",
+                "community": "Comunidad, Votaciones & Fans",
+            }.get(section, section)
+            response_text = f"Abriendo {label} en tu panel de artista."
+            if section == "paypal" and artist_facts:
+                response_text += (
+                    f" Tu saldo disponible es ${float(artist_facts.get('available_balance_usd') or 0):,.2f} USD "
+                    f"y tu modo de retiro es {artist_facts.get('payout_mode', 'manual')}."
+                )
+        elif path.startswith("/?sandbox"):
+            response_text = "Activando el modo Sandbox para que puedas probar el checkout sin dinero real."
+        elif path == "/portal":
+            response_text = "Abriendo tu portal de fan con tus compras, descargas y biblioteca."
+        else:
+            response_text = "Abriendo el inicio para explorar el catálogo musical."
+        return JSONResponse({
+            "response": response_text,
+            "action": "navigate",
+            "action_data": {"path": path, "section": section, "url": path},
+            "account_role": account_role,
+            "catalog_size": len(catalog),
+        })
+
 
     # ── Buscar canción mencionada en el mensaje (scope acotado) ──
     search_catalog = scoped_catalog
     search_ctx = ctx
-    search_results = scoped_fuzzy_search(
-        raw_message, search_catalog, search_ctx, top_n=5, threshold=0.18, read_lyrics_fn=read_lyrics_content
-    )
-    best_match = search_results[0] if search_results else None
+    # El resolvedor agéntico (más abajo) hace su propia búsqueda multi-estrategia
+    # cuando la intención es reproducir/buscar o el mensaje es largo; evitamos una
+    # pasada fuzzy redundante en ese caso (ahorra ~1.4s por turno).
+    will_run_agent_search = is_play_intent or is_search_intent or len(raw_message) > 5
+    if will_run_agent_search:
+        search_results: list[dict] = []
+        best_match = None
+    else:
+        search_results = scoped_fuzzy_search(
+            raw_message, search_catalog, search_ctx, top_n=5, threshold=0.18, read_lyrics_fn=None
+        )
+        best_match = search_results[0] if search_results else None
 
     # ── Sistema Agéntico de Búsqueda Multi-Paso (Agent Search Resolver) ──
     # Si la intención es reproducir o buscar, activamos el resolvedor agéntico
@@ -434,11 +674,13 @@ async def agent_chat(req: AgentChatRequest):
         # Estrategia A: Búsqueda del título puro (Fuzzy)
         if len(clean_music_query) >= 3:
             strategy_results.extend(scoped_fuzzy_search(
-                clean_music_query, search_catalog, search_ctx, top_n=5, threshold=0.10, read_lyrics_fn=read_lyrics_content
+                clean_music_query, search_catalog, search_ctx, top_n=5, threshold=0.10, read_lyrics_fn=None
             ))
-        strategy_results.extend(scoped_fuzzy_search(
-            raw_message, search_catalog, search_ctx, top_n=4, threshold=0.12, read_lyrics_fn=read_lyrics_content
-        ))
+        # Solo añadir la pasada del mensaje crudo si aporta (evita búsqueda duplicada)
+        if normalize(clean_music_query) != message_norm:
+            strategy_results.extend(scoped_fuzzy_search(
+                raw_message, search_catalog, search_ctx, top_n=4, threshold=0.12, read_lyrics_fn=None
+            ))
 
         # 4. Agente de Scoring y Re-Ranking: Evaluar cada candidato según filtros específicos del usuario
         scored_candidates = []
@@ -507,23 +749,77 @@ async def agent_chat(req: AgentChatRequest):
         # Actualizar resultados con el ranking inteligente del agente
         search_results = [item for score, item in scored_candidates if score >= 0.12]
         best_match = search_results[0] if search_results else None
+        best_match_score = scored_candidates[0][0] if scored_candidates else 0.0
 
-        # Si el fuzzy search no encontró nada pero el usuario pidió una recomendación
-        # (sin título específico), poblar con items filtrados por idioma/género
-        if not best_match and (is_recommend_intent or target_lang or target_genre):
+        # Idioma implícito para recomendaciones: el del usuario si no se pidió uno.
+        rec_lang = target_lang or (req.user_language if req.user_language in ("es", "en") else None)
+        # Preferir canciones salvo que el usuario pida explícitamente audiolibro/libro
+        # o esté dentro de un canal de audiolibros.
+        wants_audiobook = any(
+            w in message_norm for w in ["audiolibro", "audiobook", "libro", "podcast", "resumen", "documental", "capitulo"]
+        )
+        prefer_song = (not wants_audiobook) and ctx.content_type != "audiobook"
+
+        def _prefer_songs(pool: list[dict]) -> list[dict]:
+            if not prefer_song:
+                return pool
+            songs = [i for i in pool if (i.get("type") or "") == "song"]
+            return songs or pool
+
+        # Si el fuzzy search no encontró nada, o es una recomendación sin título claro
+        # (score bajo), poblar con candidatos filtrados por idioma/género/canción.
+        force_recommend = is_recommend_intent and best_match_score < 0.5
+        if force_recommend or (not best_match and (is_recommend_intent or target_lang or target_genre)):
             agent_candidates = search_catalog
             if target_lang:
                 agent_candidates = [i for i in agent_candidates if _get_item_language(i) == target_lang]
+            elif is_recommend_intent and rec_lang:
+                agent_candidates = [i for i in agent_candidates if _get_item_language(i) == rec_lang] or agent_candidates
             if target_genre:
                 agent_candidates = [i for i in agent_candidates if target_genre in (i.get("genre") or "").lower()]
-            
+
+            agent_candidates = _prefer_songs(agent_candidates)
+
             # Fallback global si no se encuentra en el catálogo filtrado
             if not agent_candidates and target_lang:
                 agent_candidates = [i for i in catalog if _get_item_language(i) == target_lang]
-                
+
             if agent_candidates:
                 search_results = agent_candidates[:5]
                 best_match = agent_candidates[0]
+                is_recommendation_pick = True
+
+        # Fallback "la que sea" / sin título específico: si el usuario quiere reproducir
+        # pero no hay ninguna coincidencia, auto-seleccionar una pista disponible.
+        if not best_match and is_play_intent:
+            fallback_pool = (
+                [i for i in scoped_catalog if _get_item_language(i) == rec_lang]
+                if (target_lang or rec_lang) else scoped_catalog
+            )
+            if not fallback_pool:
+                fallback_pool = scoped_catalog
+            fallback_pool = _prefer_songs(fallback_pool)
+            if fallback_pool:
+                best_match = fallback_pool[0]
+                search_results = fallback_pool[:5]
+                is_recommendation_pick = True
+
+        # Si el usuario no pidió audiolibro y el match resultó ser uno (fuzzy débil),
+        # preferir una canción disponible del idioma pedido.
+        if (
+            best_match
+            and prefer_song
+            and is_play_intent
+            and (best_match.get("type") or "") != "song"
+        ):
+            song_pool = [
+                i for i in (search_catalog or scoped_catalog)
+                if (i.get("type") or "") == "song"
+                and (not (target_lang or rec_lang) or _get_item_language(i) == (target_lang or rec_lang))
+            ]
+            if song_pool:
+                best_match = song_pool[0]
+                search_results = song_pool[:5]
                 is_recommendation_pick = True
 
     # ── Interceptar menciones de creadores para navegar a su perfil ──
@@ -572,12 +868,21 @@ async def agent_chat(req: AgentChatRequest):
     # ── Procesar intenciones ──
 
     # Usar LLM para procesar de forma inteligente si es una pregunta conversacional, emocional, de traducción o explicación
-    use_llm = False
-    
     # Palabras clave que indican una conversación o pregunta abstracta
     llm_kw = ["traduc", "tradus", "explic", "consept", "tenant", "multitenant", "empresa", "recomiend", "emocion", "momento del dia", 
               "desafio", "autodescubr", "meta", "objetivo", "humana", "triste", "alegre", "feliz", "motiv", "estres", "ansied",
               "puedes", "como", "por que", "quien", "ayuda", "dime", "cuenta", "significa"]
+
+    # Activar LLM para preguntas conversacionales, semánticas y explicativas
+    # También activar si el usuario quiere reproducir pero no hay coincidencia (best_match=None)
+    use_llm = (
+        not is_play_intent and not is_greet and not is_help
+        and (
+            is_meaning_intent or is_lyrics_intent or is_recommend_intent
+            or any(k in message_lower for k in llm_kw)
+            or (not is_filter_intent and not is_search_intent and len(raw_message) > 10)
+        )
+    ) or (is_play_intent and not best_match)
     
     # ── Intención de Stream DJ / Mezclador Inteligente en Tiempo Real ──
     if is_dj_intent:
@@ -625,40 +930,54 @@ async def agent_chat(req: AgentChatRequest):
                     "catalog_size": len(catalog),
                 })
 
-    # ── Respuesta inmediata de reproducción (sin LLM) ──
-    # Si la intención es clara de reproducción y ya tenemos el mejor track, responder de inmediato
-    if is_play_intent and best_match and not is_filter_intent:
+    # ── Letras: mostrar directamente si solo piden ver la letra (rápido y fiable) ──
+    # Para "explícame la letra" (meaning + lyrics) se delega al LLM con la letra inyectada.
+    if is_lyrics_intent and not is_meaning_intent:
+        track_to_show = best_match or (current_track if current_track.get("id") else None)
+        if track_to_show:
+            title = track_to_show.get("title", "la canción actual")
+            lyrics_content = read_lyrics_content(track_to_show.get("lyrics_path", ""), max_chars=1200)
+            if lyrics_content:
+                sample = "\n".join([l for l in lyrics_content.split("\n") if l.strip()][:12])
+                return JSONResponse({
+                    "response": f'Letras de "{title}":\n\n{sample}\n\nLetra completa disponible sincronizada en el reproductor.',
+                    "action": "show_lyrics",
+                    "action_data": {"item": track_to_show},
+                    "catalog_size": len(catalog),
+                })
+            return JSONResponse({
+                "response": f'No encontré el archivo de letras de "{title}", pero puedes ver la letra sincronizada en el reproductor si está disponible.',
+                "action": "show_lyrics_current",
+                "action_data": {},
+                "catalog_size": len(catalog),
+            })
+
+    # ── Respuesta inmediata de reproducción / recomendación (sin LLM) ──
+    # Si la intención es clara de reproducir o recomendar y ya tenemos el mejor track,
+    # reproducir de inmediato (no mostrar listas ni quedarse mudo).
+    if best_match and not is_filter_intent and not is_lyrics_intent and (is_play_intent or is_recommend_intent):
         lang_label = {"es": "en español", "en": "en inglés"}.get(target_lang or "", "")
         genre_label = f" de {target_genre}" if target_genre else ""
         track_title = best_match.get("title", "la canción")
         creator_label = best_match.get("creator", "")
+        verb = "Te recomiendo" if (is_recommend_intent and not is_play_intent) else "Reproduciendo"
         response_text = (
-            f"Reproduciendo: **{track_title}**"
+            f"{verb}: {track_title}"
             + (f" de {creator_label}" if creator_label else "")
-            + (f" — una pista {lang_label}{genre_label} cuidadosamente seleccionada para ti." if (lang_label or genre_label) else ".")
+            + (f" — una pista {lang_label}{genre_label} seleccionada para ti." if (lang_label or genre_label) else ".")
         )
         return JSONResponse({
             "response": response_text,
             "action": "play",
-            "action_data": {"item": best_match},
+            "action_data": {"item": best_match, "alternatives": search_results[1:5]},
             "catalog_size": len(catalog),
         })
 
     if use_llm:
         try:
-            # Obtener las llaves o configurar un modelo de lenguaje para responder
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            from langchain_openai import ChatOpenAI
-            from config import GEMINI_API_KEY, OPENAI_API_KEY
-            
-            llm = None
-            if OPENAI_API_KEY:
-                # Priorizar gpt-5-nano como modelo principal de OpenAI según directriz del usuario
-                llm = ChatOpenAI(model="gpt-5-nano", api_key=OPENAI_API_KEY, temperature=0.7)
-            elif GEMINI_API_KEY:
-                llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GEMINI_API_KEY, temperature=0.7)
-                
-            if llm:
+            # Motor LLM nativo con cascada rápida y fail-fast (Groq → OpenAI).
+            # Se evita langchain (retries + prompts gigantes) que causaba cuelgues.
+            if True:
                 path_str = req.current_path or ""
                 # Usar el catálogo correcto según si hay override de idioma
                 is_lang_override = search_ctx is not ctx
@@ -679,7 +998,7 @@ async def agent_chat(req: AgentChatRequest):
 
                 catalog_for_prompt = sorted(raw_catalog_subset, key=final_sort_key)
                 catalog_context_str = build_catalog_prompt_lines(
-                    catalog_for_prompt, limit=20, read_lyrics_fn=read_lyrics_content
+                    catalog_for_prompt, limit=12, read_lyrics_fn=None
                 )
                 creator_section = build_creator_prompt_section(
                     search_ctx if is_lang_override else ctx,
@@ -698,25 +1017,53 @@ async def agent_chat(req: AgentChatRequest):
                         if content:
                             curr_track_str += f"\nLetras actuales:\n{content}"
 
+                # ── Pista en foco: la que el usuario mencionó (best_match) o la actual ──
+                # Se inyectan sus letras completas para que Saori pueda explicarlas de verdad.
+                focus_track = best_match or (current_track if current_track.get("id") else None)
+                focus_track_str = ""
+                if focus_track:
+                    ft_parts = [
+                        f"Título: {focus_track.get('title', '')}",
+                        f"Canal/Creador: {focus_track.get('creator', '')}",
+                        f"Género: {focus_track.get('genre', '')}",
+                        f"Álbum/Serie: {focus_track.get('album') or focus_track.get('artist') or ''}",
+                    ]
+                    if focus_track.get("description"):
+                        ft_parts.append(f"Descripción: {focus_track['description']}")
+                    focus_lyrics = read_lyrics_content(focus_track.get("lyrics_path", ""), max_chars=1800)
+                    if focus_lyrics:
+                        ft_parts.append(
+                            "LETRA COMPLETA (úsala para explicar, resumir o citar con precisión):\n"
+                            + focus_lyrics
+                        )
+                    focus_track_str = "\n".join(ft_parts)
+
                 # RAG multi-namespace (creador → tipo → global)
+                # Se omite si ya tenemos la letra/descripción de la pista en foco
+                # (preguntas de letra/significado) para responder más rápido.
                 rag_context = ""
-                try:
-                    from lib.pinecone_sync import pinecone_sync
-                    rag_namespaces = get_rag_namespaces(ctx)
-                    matches = await pinecone_sync.query_vectors(
-                        raw_message, top_k=4, namespaces=rag_namespaces
-                    )
-                    if matches:
-                        rag_context = "\nContexto semántico RAG (priorizado por canal/tipo):\n"
-                        for match in matches:
-                            meta = match.get("metadata", {})
-                            ns = match.get("_namespace", "global")
-                            rag_context += (
-                                f"- [{ns}] Fuente: {meta.get('filename', meta.get('title', 'N/A'))} | "
-                                f"Texto: {meta.get('text', '')[:400]}\n"
-                            )
-                except Exception as ree:
-                    logger.warning(f"Error en consulta RAG Pinecone: {ree}")
+                focus_has_lyrics = bool(focus_track_str and "LETRA COMPLETA" in focus_track_str)
+                if not ((is_lyrics_intent or is_meaning_intent) and focus_has_lyrics):
+                    try:
+                        from lib.pinecone_sync import pinecone_sync
+                        rag_namespaces = get_rag_namespaces(ctx)
+                        matches = await asyncio.wait_for(
+                            pinecone_sync.query_vectors(
+                                raw_message, top_k=4, namespaces=rag_namespaces
+                            ),
+                            timeout=4.0,
+                        )
+                        if matches:
+                            rag_context = "\nContexto semántico RAG (priorizado por canal/tipo):\n"
+                            for match in matches:
+                                meta = match.get("metadata", {})
+                                ns = match.get("_namespace", "global")
+                                rag_context += (
+                                    f"- [{ns}] Fuente: {meta.get('filename', meta.get('title', 'N/A'))} | "
+                                    f"Texto: {meta.get('text', '')[:400]}\n"
+                                )
+                    except Exception as ree:
+                        logger.warning(f"Error en consulta RAG Pinecone: {ree}")
 
                 hist_str = ""
                 if req.conversation_history:
@@ -724,31 +1071,43 @@ async def agent_chat(req: AgentChatRequest):
                         [f"{h.get('sender', 'user')}: {h.get('text', '')}" for h in req.conversation_history[-5:]]
                     )
 
-                audiobook_instruction = ""
-                if ctx.content_type == "audiobook":
-                    global_audiobooks = [i for i in catalog if i.get("type") == "audiobook"]
-                    if global_audiobooks:
-                        titles = ", ".join([f'"{a["title"]}" ({a.get("creator", "")})' for a in global_audiobooks[:8]])
-                        audiobook_instruction = (
-                            f"\nPREGUNTA SOBRE AUDIOLIBROS: Busca en TODA la plataforma, no solo en el canal musical activo. "
-                            f"Audiolibros disponibles en la plataforma (ejemplos): {titles}. "
-                            f"Si el canal activo no tiene audiolibros, recomienda canales como Audiolibros de Metafísica o Mentalidad HBL.\n"
-                        )
-
                 # Cargar el prompt desde el archivo de skill modular
                 skills_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
                 saori_skill = load_skill_file(os.path.join(skills_dir, "saori_assistant.md"))
                 if not saori_skill:
-                    saori_skill = "Eres Saori, la guía inteligente y curadora de Programación Mental Auditiva de Éxito.cyou (Sintoniza tu mente. Crea tu realidad)."
+                    saori_skill = (
+                        "Eres Saori, copiloto de Éxito.cyou, un marketplace musical con PayPal. "
+                        "Ayudas a fans a descubrir, escuchar, comprar y descargar música, y a artistas "
+                        "a gestionar su cuenta, ingresos, catálogo, audiencia y agente de ventas."
+                    )
 
+                account_block = account.get("prompt_block") or ""
+                ui_state_str = ""
+                if isinstance(req.ui_state, dict) and req.ui_state:
+                    clean_ui = {k: v for k, v in req.ui_state.items() if isinstance(v, (str, int, float, bool))}
+                    if clean_ui:
+                        ui_state_str = "ESTADO DE LA INTERFAZ: " + ", ".join(
+                            f"{k}={v}" for k, v in clean_ui.items()
+                        ) + ".\n"
 
                 system_prompt = (
                     f"{saori_skill}\n\n"
+                    f"REGLA DE PLATAFORMA: Éxito.cyou es EXCLUSIVAMENTE un marketplace y streaming de MÚSICA. "
+                    f"Nunca menciones audiolibros, frecuencias Solfeggio, decretos, membresías, "
+                    f"programación mental ni funciones que no aparezcan en este contexto. Si no tienes un dato, dilo.\n"
+                    f"{page_line}\n"
                     f"Ruta actual del navegador: {path_str}\n"
+                    f"{ui_state_str}"
                     f"{creator_section}\n"
-                    f"{audiobook_instruction}\n"
+                    f"{account_block}\n"
                     f"IMPORTANTE - CANCIÓN ACTUAL: La canción que está reproduciéndose AHORA MISMO se indica en 'Reproduciendo actualmente'. "
                     f"Cuando el usuario pregunte qué está sonando, responde EXACTAMENTE con el título indicado ahí. No inventes ni confundas títulos.\n"
+                    f"IMPORTANTE - PRECISIÓN: Usa solo los DATOS VERIFICADOS de la cuenta y el catálogo. Prohibido inventar cifras, "
+                    f"ventas, retiros, funciones o páginas. Si no sabes algo, dilo y ofrece abrir la sección correcta.\n"
+                    f"IMPORTANTE - COPILOTO: Conoces la ubicación del usuario y puedes ayudarle a navegar con "
+                    f'{{"action":"navigate","path":"/artist-studio","section":"paypal"}} o {{"action":"navigate","path":"/portal"}}. '
+                    f"Puedes reproducir con {{\"action\":\"play\",\"trackid\":ID}} y abrir el checkout con "
+                    f'{{"action":"checkout","trackid":ID}}. Escribe el JSON al final, invisible para el usuario.\n'
                     f"IMPORTANTE - FORMATO: Texto natural conversacional en español mexicano, sin markdown.\n"
 
 
@@ -759,6 +1118,11 @@ async def agent_chat(req: AgentChatRequest):
 
 
                     f"Reproduciendo actualmente: {curr_track_str}\n\n"
+
+
+                    f"PISTA EN FOCO (la que el usuario menciona o la que está escuchando):\n{focus_track_str or 'Ninguna'}\n"
+                    f"Si el usuario pide explicar la letra, el significado o de qué trata, usa la LETRA COMPLETA de esta pista en foco. "
+                    f"Nunca digas que no tienes acceso a la letra si está incluida arriba.\n\n"
 
 
                     f"Historial reciente:\n{hist_str}\n\n"
@@ -774,8 +1138,11 @@ async def agent_chat(req: AgentChatRequest):
                     SystemMessage(content=system_prompt),
                     HumanMessage(content=raw_message)
                 ]
-                llm_response = await llm.ainvoke(messages)
-                response_text = llm_response.content
+                response_text = await _call_chat_llm(
+                    system_prompt, raw_message, req.conversation_history, timeout=14.0
+                )
+                if not response_text:
+                    raise RuntimeError("LLM sin respuesta a tiempo; usando heurísticas")
                 # Sanitizar asteriscos y guiones bajos según AGENTS.md regla 4:
                 response_text = response_text.replace("**", "").replace("_", "")
                 
@@ -805,8 +1172,18 @@ async def agent_chat(req: AgentChatRequest):
                         if "artista" in extracted_json and "slug" not in extracted_json:
                             extracted_json["slug"] = extracted_json.pop("artista")
                         
+                        # Navegación interna del copiloto (paneles, portal, sandbox)
+                        if extracted_json.get("action") == "navigate" and (extracted_json.get("path") or extracted_json.get("ruta")):
+                            nav_path = extracted_json.get("path") or extracted_json.get("ruta") or ""
+                            if nav_path.startswith("/"):
+                                action = "navigate"
+                                action_data = {
+                                    "path": nav_path,
+                                    "section": extracted_json.get("section") or "",
+                                    "url": nav_path,
+                                }
                         # Si es una acción de navegación o redirección a creador escrita por el LLM
-                        if extracted_json.get("action") == "navigate" or "destination" in extracted_json or "slug" in extracted_json or "artistslug" in extracted_json:
+                        elif extracted_json.get("action") == "navigate" or "destination" in extracted_json or "slug" in extracted_json or "artistslug" in extracted_json:
                             dest = extracted_json.get("destination") or extracted_json.get("slug") or extracted_json.get("artistslug")
                             if dest:
                                 dest_map = {
@@ -923,35 +1300,62 @@ async def agent_chat(req: AgentChatRequest):
                             if creator_songs:
                                 action_data["autoplay_track"] = creator_songs[0]
 
-                if not navigation_triggered and is_play_intent and best_match and action is None:
+                if not navigation_triggered and best_match and action is None and (is_play_intent or is_recommend_intent) and not is_lyrics_intent:
                     action = "play"
-                    action_data = {"item": best_match}
-                elif not navigation_triggered and is_play_intent and not best_match:
-                    pass  # no auto-play aleatorio desde texto LLM
-            else:
-                use_llm = False  # Fallback a heurísticas si no hay LLM configurado
+                    action_data = {"item": best_match, "alternatives": search_results[1:5]}
         except Exception as e:
             logger.error(f"Error invocando LLM en chat: {e}")
             use_llm = False
 
     if not use_llm:
         if is_greet and not is_play_intent:
-            response_text = (
-                "Hola! Soy Saori, tu guía de Éxito.cyou, la plataforma de programación mental auditiva y bienestar. "
-                "Sintoniza tu mente y crea tu realidad. Puedo ayudarte a reproducir frecuencias, explorar audiolibros, "
-                "mezclar en la cabina DJ o descubrir nueva música. ¿Qué estado mental deseas potenciar hoy?"
-            )
+            if account_role == "artist":
+                artist_facts = account.get("artist") or {}
+                response_text = (
+                    f"Hola, {account.get('name') or 'artista'}. Soy Saori, tu copiloto en Éxito.cyou. "
+                    f"Estás en tu Artist Studio. Tu saldo disponible es "
+                    f"${float(artist_facts.get('available_balance_usd') or 0):,.2f} USD, "
+                    f"tienes {artist_facts.get('tracks_count', 0)} canciones y "
+                    f"{artist_facts.get('sales_count', 0)} ventas registradas. "
+                    f"Puedo analizar tu cuenta, abrir tus retiros, tu catálogo, tu audiencia o tu canal público. "
+                    f"¿Qué quieres revisar?"
+                )
+            elif account_role == "fan":
+                response_text = (
+                    "Hola. Soy Saori, tu copiloto musical en Éxito.cyou. Puedo recomendarte música, "
+                    "explicarte letras, controlar la reproducción y abrir tu portal de compras y descargas. "
+                    "¿Qué quieres escuchar hoy?"
+                )
+            else:
+                response_text = (
+                    "Hola. Soy Saori, tu copiloto musical en Éxito.cyou. Puedo recomendarte música, "
+                    "explicarte letras, controlar la reproducción y mostrarte cómo comprar o descargar pistas "
+                    "por PayPal. ¿Qué te gustaría escuchar?"
+                )
 
 
         elif is_help and not is_play_intent:
-            response_text = (
-                "Puedo ayudarte con lo siguiente:\n\n"
-                "Reproducir: reproduce Llama Violeta\n"
-                "Filtrar: muéstrame canciones de rap\n"
-                "Letras: muestra las letras de la canción actual\n"
-                "Significado: de qué trata la canción?\n"
-                "Comprar: quiero comprar esta pista"
-            )
+            if account_role == "artist":
+                response_text = (
+                    "Puedo ayudarte como copiloto de tu cuenta de artista:\n\n"
+                    "Analizar tu cuenta: analiza mi cuenta\n"
+                    "Ingresos y retiros: abre PayPal Marketplace\n"
+                    "Catálogo: abre mi catálogo\n"
+                    "Audiencia: abre mi comunidad\n"
+                    "Agente y WhatsApp: abre mi agente IA\n"
+                    "Canal público: abre mi canal público\n"
+                    "Música: reproduce una canción en español"
+                )
+            else:
+                response_text = (
+                    "Puedo ayudarte con lo siguiente:\n\n"
+                    "Reproducir: reproduce una canción en español\n"
+                    "Recomendar: recomiéndame algo para enfocarme\n"
+                    "Letras: muéstrame la letra de esta canción\n"
+                    "Significado: de qué trata esta canción\n"
+                    "Comprar: quiero comprar esta pista\n"
+                    "Mi cuenta: abre mi portal de compras y descargas"
+                )
 
         elif is_meaning_intent:
             track_to_explain = best_match or (current_track if current_track.get("id") else None)
@@ -1025,22 +1429,23 @@ async def agent_chat(req: AgentChatRequest):
                     best_match.get("title", ""),
                 )
                 
-                if top_score > 0.65 or len(search_results) == 1 or is_recommendation_pick:
+                if top_score > 0.65 or len(search_results) == 1 or is_recommendation_pick or is_recommend_intent:
                     action = "play"
                     action_data = {"item": best_match}
                     title = best_match.get("title", "")
                     artist = best_match.get("artist", "")
                     lang_note = "español" if target_lang == "es" else "inglés" if target_lang else ""
                     response_text = (
-                        f'{"Te recomiendo " if is_recommendation_pick else "¡Claro! Reproduciendo "}'
-                        f'{f"en {lang_note} " if lang_note and is_recommendation_pick else ""}'
+                        f'{"Te recomiendo " if (is_recommendation_pick or is_recommend_intent) else "¡Claro! Reproduciendo "}'
+                        f'{f"en {lang_note} " if lang_note and (is_recommendation_pick or is_recommend_intent) else ""}'
                         f'"{title}"'
                         f'{" de " + artist if artist else ""}. '
-                        f'{"¡Reproduciéndolo ahora para ti!" if is_recommendation_pick else "¡Disfruta la música! 🎵"}'
+                        f'{"¡Reproduciéndolo ahora para ti!" if (is_recommendation_pick or is_recommend_intent) else "¡Disfruta la música! 🎵"}'
                     )
                     if len(search_results) > 1:
                         action_data["alternatives"] = search_results[1:5]
                 else:
+                    # Ambigüedad REAL: múltiples resultados con score muy similar — mostrar lista para que el usuario elija
                     action = "show_results"
                     action_data = {"items": search_results[:5]}
                     response_text = (
@@ -1084,7 +1489,7 @@ async def agent_chat(req: AgentChatRequest):
                         )
                 else:
                     broad_results = scoped_fuzzy_search(
-                        raw_message, search_catalog, ctx, top_n=4, threshold=0.08, read_lyrics_fn=read_lyrics_content
+                        raw_message, search_catalog, ctx, top_n=4, threshold=0.08, read_lyrics_fn=None
                     )
                     if broad_results:
                         action = "show_results"

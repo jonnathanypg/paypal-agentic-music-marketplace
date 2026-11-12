@@ -5,7 +5,18 @@ const ADMIN_ROUTES = ['/dashboard', '/studio', '/playlist', '/audiobooks', '/sho
 const SUPER_ADMIN_ROUTES = ['/admin'];
 
 export function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl;
+  const { pathname, searchParams } = request.nextUrl;
+
+  // Preservar sandbox mode en redirecciones al login
+  const sandboxParam = searchParams.get('sandbox') ?? request.cookies.get('exito_sandbox_mode')?.value;
+  const isSandbox = sandboxParam === '1' || sandboxParam === 'true';
+
+  const makeLoginUrl = (extra?: Record<string, string>) => {
+    const url = new URL('/login', request.url);
+    if (isSandbox) url.searchParams.set('sandbox', '1');
+    if (extra) Object.entries(extra).forEach(([k, v]) => url.searchParams.set(k, v));
+    return url;
+  };
 
   // Check if route needs authentication (join de invitados Live es público)
   const isLiveJoin = pathname === '/live/join' || pathname.startsWith('/live/join/');
@@ -18,9 +29,7 @@ export function middleware(request: NextRequest) {
 
   const session = request.cookies.get('mediasuite_session');
   if (!session?.value) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('redirect', pathname);
-    return NextResponse.redirect(loginUrl);
+    return NextResponse.redirect(makeLoginUrl({ redirect: pathname }));
   }
 
   try {
@@ -30,17 +39,14 @@ export function middleware(request: NextRequest) {
     const payload = JSON.parse(atob(base64));
     const now = Math.floor(Date.now() / 1000);
     if (payload.exp && payload.exp < now) {
-      const url = new URL('/login', request.url);
-      url.searchParams.set('redirect', pathname);
-      url.searchParams.set('reason', 'expired');
-      return NextResponse.redirect(url);
+      return NextResponse.redirect(makeLoginUrl({ redirect: pathname, reason: 'expired' }));
     }
 
     const role = payload.role;
 
     // Super admin routes require super_admin role
     if (isSuperAdminRoute && role !== 'super_admin') {
-      return NextResponse.redirect(new URL('/login', request.url));
+      return NextResponse.redirect(makeLoginUrl());
     }
 
     // Admin routes require admin role — clientes redirigidos a su portal
@@ -55,9 +61,7 @@ export function middleware(request: NextRequest) {
 
     return NextResponse.next();
   } catch {
-    const url = new URL('/login', request.url);
-    url.searchParams.set('redirect', pathname);
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(makeLoginUrl({ redirect: pathname }));
   }
 }
 

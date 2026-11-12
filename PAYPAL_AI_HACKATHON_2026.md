@@ -1,176 +1,57 @@
-<div align="center">
+# PayPal AI Hackathon 2026 — Submission Notes
 
-# 🎵 PayPal Agentic Music Marketplace (`exito.cyou`)
+Project: **Éxito.cyou — Autonomous Agentic Music Marketplace with PayPal**
 
-### **Autonomous AI Music Streaming, Cloud DJ Radio & Zero-Pre-Funding PayPal Marketplace for Independent Artists**
+- Deadline: **Nov 12, 2026, 12:00 pm PT (3:00 pm GMT-5 / 20:00 UTC)**
+- Submission page: https://paypalaihackathon.devpost.com/
+- Repository: https://github.com/jonnathanypg/paypal-agentic-music-marketplace
+- Demo (sandbox, no real money): https://exito.cyou/?sandbox=1
 
-[![Live Demo](https://img.shields.io/badge/LIVE_DEMO-exito.cyou-0070ba?style=for-the-badge&logo=paypal&logoColor=white)](https://exito.cyou)
-[![Artist Studio](https://img.shields.io/badge/ARTIST_STUDIO-exito.cyou%2Fartist--studio-c9a84c?style=for-the-badge&logo=applemusic&logoColor=black)](https://exito.cyou/artist-studio)
-[![Deployment Status](https://img.shields.io/badge/Deployment-Production_Active-10b981?style=for-the-badge&logo=githubactions&logoColor=white)](https://exito.cyou)
-[![License: MIT](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)](./LICENSE)
+## Canonical documents
 
-[![PayPal API](https://img.shields.io/badge/PayPal_API-Orders_v2_%2B_Payouts_%2B_Identity-003087?style=flat-square&logo=paypal)](https://developer.paypal.com)
-[![Next.js](https://img.shields.io/badge/Frontend-Next.js_16_%2B_React_19-black?style=flat-square&logo=next.js)](https://nextjs.org)
-[![FastAPI](https://img.shields.io/badge/Backend-FastAPI_%2B_SQLAlchemy-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com)
-[![Multi-Agent AI](https://img.shields.io/badge/AI_Engine-Saori_Cloud_DJ_%2B_Artist_RAG-7c3aed?style=flat-square&logo=openai)](https://exito.cyou)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg?style=flat-square)](./CONTRIBUTING.md)
+| Document | Purpose |
+|---|---|
+| [`README.md`](./README.md) | Product overview, architecture and setup |
+| [`TESTING.md`](./TESTING.md) | Judge access, sandbox demo accounts, troubleshooting |
+| [`DEVPOST_SUBMISSION.md`](./DEVPOST_SUBMISSION.md) | Ready-to-paste Devpost fields and description |
+| [`DEMO_VIDEO_SCRIPT.md`](./DEMO_VIDEO_SCRIPT.md) | English demo video script (<3 minutes) |
 
-**🌐 Live Production Demo:** [https://exito.cyou](https://exito.cyou) • **🎤 Artist Studio:** [https://exito.cyou/artist-studio](https://exito.cyou/artist-studio) • **🔐 1-Click PayPal & Google Auth:** [https://exito.cyou/login](https://exito.cyou/login)
+## What is implemented (accurate)
 
-</div>
+- PayPal **Orders v2** create + capture, with captured amount/currency validation.
+- PayPal **Payouts v1** for artist withdrawals and the 85/15 split ledger.
+- PayPal **JavaScript SDK** checkout buttons (PayPal and card funding sources).
+- Request-level **sandbox mode** (`?sandbox=1` / `sandbox_mode: true`) that uses
+  `https://api-m.sandbox.paypal.com` and dedicated sandbox app credentials.
+- AI concierge with intent routing + LLM generation, catalog recommendations and
+  a checkout action; OpenAI `gpt-5-nano`, Google Gemini `2.5-flash`,
+  LangChain/LangGraph, local Faster-Whisper and Kokoro TTS.
+- Artist Studio with catalog, albums, lyrics, covers, analytics and payout modes.
+- 700+ original tracks and 30+ albums in the hosted demo.
 
----
+## Verified end-to-end (2026-11-11)
 
-## 🚀 Executive Summary
+Hosted sandbox demo, using the app's PayPal SDK popup flow (not a hand-built
+`checkoutnow` URL):
 
-Independent musicians, record labels, and audio creators face a broken monetization model: streaming platforms pay **$0.003 per stream**, while building a direct-to-fan digital storefront with automated split settlements typically requires complex merchant onboarding or upfront working capital (pre-funding).
+| Step | Evidence |
+|---|---|
+| Create order | `56H75135LP133603P`, `mode: sandbox` |
+| Capture + purchase | purchase `17`, transaction `2BV594211J593044C` |
+| Amount validation | $0.99 USD matched the catalog price |
+| 85/15 split | gross $0.99 / platform fee $0.15 / artist net $0.84 credited to `billionaire-records-demo` |
+| Download | licensed MP3 served (3.1 MB, ID3-tagged) |
+| Payouts v1 | sandbox batch `W9B28U85FAL9U`, status `completed` |
 
-**PayPal Agentic Music Marketplace (`exito.cyou`)** solves this by combining:
-1. **💳 1-Click PayPal Identity Login & Instant Artist Sync:**
-   - **For Artists:** Logging in with PayPal automatically creates their Artist Channel and synchronizes their PayPal email/Merchant ID (`paypal_verified = True`) so they can immediately start receiving **85% net revenue splits**. Artists can also sign in with **Google OAuth** to auto-import their YouTube channel name and avatar.
-   - **For Fans:** Logging in with PayPal pre-links their identity for **1-Click PayPal Express Checkout** and instant high-bitrate MP3/WAV downloads.
-2. **💸 Zero-Pre-Funding PayPal Marketplace Split Engine (85% Artist / 15% Platform):**
-   - Fans purchase tracks or full album bundles via **PayPal Orders v2 API**.
-   - The platform collects 100% of the payment at checkout (zero pre-funding required by the marketplace operator), immediately unlocks physical MP3/WAV downloads for the fan, retains a **15% platform fee**, and credits **85% net revenue** to the artist's ledger.
-   - Artists have full flexibility over how they receive their funds via **PayPal Payouts API**: **Instant Payouts**, **Minimum Threshold ($50/$100)**, **Weekly/Monthly Scheduled**, **Manual On-Demand**, or **1-Click Conversion into AI Production Tokens**.
-3. **🤖 Conversational PayPal Agentic Commerce (Web, WhatsApp QR & Telegram):**
-   - Every independent artist gets a customizable **AI Sales & Fan Concierge Agent** trained on their biography, discography, lyrics, and pricing (`rag_context`).
-   - Fans can chat with the artist's AI agent on the web channel (`/channel/[slug]`), via **WhatsApp** (linked via self-service QR code), or **Telegram** to ask for song recommendations and receive **executable in-chat PayPal Checkout Cards** generated autonomously by the agent.
-4. **🎙️ 24/7 Cloud DJ ("Saori AI") & Multi-Signal Recommendation Engine:**
-   - Fans react to tracks with a **Heart (`♥`)** button (clean UX, zero comment spam).
-   - Our proprietary recommendation engine (`/api/artist-studio/recommendations/feed`) combines **PayPal Purchases (+6.0)**, **Saori AI Conversational Requests (+4.0)**, **Heart `♥` Reactions (+3.0)**, and **Stream Completion (+1.5)** to personalize discovery in real time.
+Direct demo-track URL:
+https://exito.cyou/channel/billionaire-records-demo?buy=2&sandbox=1
 
----
+## Claims to avoid
 
-## 🏗️ System Architecture
-
-```mermaid
-flowchart TB
-    subgraph Auth["🔐 1-Click Identity & Onboarding"]
-        PPLogin["PayPal Identity Login\n(Auto-Syncs Artist Payout Email & Fan Express)"]
-        GLogin["Google & YouTube OAuth2\n(Auto-Imports Channel Name & Avatar)"]
-    end
-
-    subgraph FanExperience["🎧 Fan & Buyer Experience (exito.cyou)"]
-        Player["24/7 Cloud DJ StreamPlayer\n+ Heart (♥) Reaction"]
-        Saori["Saori AI Voice/Chat DJ\n(Natural Language Song Requests)"]
-        ChannelPage["Artist Channel (/channel/slug)\nTracks, Albums, Polls & AI Concierge"]
-    end
-
-    subgraph AgenticLayer["🤖 Omnichannel PayPal Agentic Commerce"]
-        ArtistRAG["Multi-Tenant Artist AI Agent\n(Custom Persona + Catalog RAG)"]
-        WA["WhatsApp QR Bridge\n(Artist's Own Number)"]
-        TG["Telegram Bot Bridge\n(@ArtistBot)"]
-        CheckoutCard["Autonomous PayPal Checkout Action\n(Single Track or Full Album Bundle)"]
-    end
-
-    subgraph PayPalEngine["💳 PayPal Zero-Pre-Funding Split Engine"]
-        PPOrders["PayPal Orders v2 API\n(/v2/checkout/orders Capture)"]
-        SplitLedger["Automated 85/15 Split Ledger\n(85% Artist Net | 15% Platform Fee)"]
-        PPPayouts["PayPal Payouts v1 API\n(Instant / Threshold / Scheduled / Manual)"]
-        TokenBridge["AI Token Reinvestment Bridge\n(Convert Sales Balance → Production Tokens)"]
-    end
-
-    Auth --> FanExperience
-    Auth --> SplitLedger
-    FanExperience --> AgenticLayer
-    AgenticLayer --> CheckoutCard
-    CheckoutCard --> PPOrders
-    PPOrders --> SplitLedger
-    SplitLedger --> PPPayouts
-    SplitLedger --> TokenBridge
-```
-
----
-
-## 🧪 Live Judge Walkthrough (Try it in 60 Seconds on `https://exito.cyou`)
-
-1. **Test 1-Click PayPal Identity Login (`/login`):**
-   - Visit **[https://exito.cyou/login](https://exito.cyou/login)**.
-   - Select **🎤 Soy Artista / Sello** and click **💳 Iniciar con PayPal (Sincroniza Pagos 85%)** (or **Continuar con Google / Canal YouTube**).
-   - Enter your PayPal email and stage name — your account is created and your PayPal payout destination is immediately verified and synced.
-2. **Explore the Independent Artist Studio (`/artist-studio`):**
-   - **📊 Analytics & Ranking:** Inspect Spotify-for-Artists style telemetry (total streams, `♥` hearts, subscribers, gross sales, 85% net balance, and conversion rates).
-   - **🎵 Upload MP3, Lyrics & Albums:** Upload original MP3/WAV tracks with custom cover art, synchronized lyrics, and individual track pricing, or bundle tracks into a full Album.
-   - **💳 PayPal Marketplace & Flexible Payouts:** Switch between **Instant**, **Threshold ($50 USD)**, **Weekly**, **Monthly**, or **Manual** PayPal Payout modes, trigger a live withdrawal, or convert sales balance into AI Tokens.
-   - **🤖 AI Agent + WhatsApp QR + Agentic Commerce Simulator:** Customize your artist AI persona, generate a WhatsApp QR code, and test the **Live PayPal Agentic Commerce Simulator** right in the dashboard (e.g., ask *"Recommend me your best track and give me a PayPal checkout link"*).
-   - **🗳️ Community Polls & Subscriber Notifications:** Launch interactive fan polls and broadcast announcements to channel subscribers.
-3. **Test the Fan Experience & Heart (`♥`) Recommendation Engine (`/` & `/channel/[slug]`):**
-   - Click the **`♥` Heart button** in the bottom `StreamPlayer` or on any track card to feed the recommendation engine.
-   - Open the **Saori AI Chat** and ask for a musical mood or genre — Saori logs a `saori_chat` signal (`weight: +4.0`) and recommends matching tracks with instant **PayPal Buy & Download** buttons.
-
----
-
-## 📂 Open-Source Repository Structure
-
-```text
-paypal-agentic-music-marketplace/
-├── backend/
-│   ├── main.py                      # FastAPI application entrypoint
-│   ├── db_models.py                 # SQLAlchemy ORM models (ArtistProfile, SplitLedger, Likes, Polls)
-│   ├── routers/
-│   │   ├── artist_studio.py         # Complete Artist Studio, PayPal Split & Agentic Commerce API
-│   │   ├── ecommerce.py             # PayPal Orders v2 capture & automated 85/15 split trigger
-│   │   ├── auth.py                  # 1-Click PayPal Identity Login, Google OAuth & JWT Auth
-│   │   ├── youtube.py               # Google / YouTube Channel OAuth2 callback & sync
-│   │   ├── tts_chat.py              # Saori AI Cloud DJ conversational recommendation signals
-│   │   └── stream.py                # 24/7 Cloud Radio & live audio streaming router
-├── src/
-│   ├── app/
-│   │   ├── page.tsx                 # Main Streaming & Marketplace Discovery Portal (exito.cyou)
-│   │   ├── login/page.tsx           # 1-Click PayPal Identity & Google OAuth Login UI
-│   │   ├── artist-studio/page.tsx   # 5-Tab Independent Artist Studio & PayPal Dashboard
-│   │   ├── channel/[slug]/page.tsx  # Public Artist Channel, Album Storefront & Live Polls
-│   │   └── portal/page.tsx          # Listener Library, Purchases & Playlists Portal
-│   └── components/
-│       └── StreamPlayer.tsx         # Global Audio Player with Heart (♥) Reaction & Lyrics
-├── CONTRIBUTING.md                  # Open-source contribution guidelines
-├── CODE_OF_CONDUCT.md               # Community Code of Conduct
-├── SECURITY.md                      # Security & vulnerability disclosure policy
-└── LICENSE                          # MIT Open-Source License
-```
-
----
-
-## 🛠️ Local Development & Self-Hosting
-
-### 1. Clone & Configure Environment
-```bash
-git clone https://github.com/jonnathanypg/paypal-agentic-music-marketplace.git
-cd paypal-agentic-music-marketplace
-cp .env.example .env
-```
-
-Configure your PayPal and Google credentials in `.env`:
-```env
-PAYPAL_CLIENT_ID=your_paypal_business_client_id
-PAYPAL_CLIENT_SECRET=your_paypal_business_client_secret
-PAYPAL_MODE=live # or sandbox
-GOOGLE_CLIENT_ID=your_google_oauth_client_id
-GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
-```
-
-### 2. Start Backend (FastAPI)
-```bash
-cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-### 3. Start Frontend (Next.js)
-```bash
-npm install
-npm run dev
-```
-
----
-
-## 🤝 Contributing & Community
-
-We welcome contributions from developers, musicians, and AI researchers! Please read our [Contributing Guide](./CONTRIBUTING.md) and [Code of Conduct](./CODE_OF_CONDUCT.md) before submitting a Pull Request.
-
-## 📄 License
-
-Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for full details.
+- Do **not** claim PayPal “Identity OAuth”; the app links a PayPal email/merchant
+  id and validates API credentials.
+- Do **not** claim webhooks; webhook-driven settlement is listed as future work.
+- Do **not** claim “SDK v6”; the app uses the standard PayPal JS SDK.
+- Never publish invented sandbox credentials. The hosted demo uses a real
+  PayPal Sandbox Personal account provisioned in the Developer Dashboard and
+  documented in `TESTING.md`.

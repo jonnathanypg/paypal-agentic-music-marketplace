@@ -10,7 +10,7 @@
 [![Deployment: Production](https://img.shields.io/badge/Deployment-Production_Active-10b981?style=for-the-badge&logo=githubactions&logoColor=white)](https://exito.cyou)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)](./LICENSE)
 
-[![PayPal API](https://img.shields.io/badge/PayPal_API-Orders_v2_%2B_Payouts_%2B_Identity-003087?style=flat-square&logo=paypal)](https://developer.paypal.com)
+[![PayPal API](https://img.shields.io/badge/PayPal_API-Orders_v2_%2B_Payouts-003087?style=flat-square&logo=paypal)](https://developer.paypal.com)
 [![Next.js](https://img.shields.io/badge/Frontend-Next.js_16_%2B_React_19-black?style=flat-square&logo=next.js)](https://nextjs.org)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI_%2B_SQLAlchemy-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com)
 [![Multi-Agent AI](https://img.shields.io/badge/AI_Engine-Saori_Cloud_DJ_%2B_Artist_RAG-7c3aed?style=flat-square&logo=openai)](https://exito.cyou)
@@ -27,7 +27,7 @@
 Independent musicians, record labels, and audio creators face a broken monetization model: streaming platforms pay **$0.003 per stream**, while building a direct-to-fan digital storefront with automated split settlements typically requires complex merchant onboarding or upfront working capital (pre-funding).
 
 **PayPal Agentic Music Marketplace (`exito.cyou`)** solves this by combining:
-1. **💳 1-Click PayPal Identity Login & Instant Artist Sync:**
+1. **💳 PayPal Account Linking & Instant Artist Sync:**
    - **For Artists:** Logging in with PayPal automatically creates their Artist Channel and synchronizes their PayPal email/Merchant ID (`paypal_verified = True`) so they can immediately start receiving **85% net revenue splits**. Artists can also sign in with **Google OAuth** to auto-import their YouTube channel name and avatar.
    - **For Fans:** Logging in with PayPal pre-links their identity for **1-Click PayPal Express Checkout** and instant high-bitrate MP3/WAV downloads.
 2. **💸 Zero-Pre-Funding PayPal Marketplace Split Engine (85% Artist / 15% Platform):**
@@ -47,8 +47,8 @@ Independent musicians, record labels, and audio creators face a broken monetizat
 
 ```mermaid
 flowchart TB
-    subgraph Auth["🔐 1-Click Identity & Onboarding"]
-        PPLogin["PayPal Identity Login\n(Auto-Syncs Artist Payout Email & Fan Express)"]
+    subgraph Auth["🔐 Account Linking & Onboarding"]
+        PPLogin["PayPal Account Linking\n(Auto-Syncs Artist Payout Email & Fan Express)"]
         GLogin["Google & YouTube OAuth2\n(Auto-Imports Channel Name & Avatar)"]
     end
 
@@ -84,12 +84,42 @@ flowchart TB
 
 ---
 
-## 🧪 Live Judge Walkthrough (Try it in 60 Seconds on `https://exito.cyou`)
+## 🧪 Judge Testing (PayPal Sandbox — No Real Money)
 
-1. **Test 1-Click PayPal Identity Login (`/login`):**
+> **Use this URL for judging:** **https://exito.cyou/?sandbox=1**
+>
+> **Direct sandbox checkout demo (verified):**
+> https://exito.cyou/channel/billionaire-records-demo?buy=2&sandbox=1
+
+The `?sandbox=1` flag shows a yellow **PAYPAL SANDBOX DEMO MODE** banner, loads the
+PayPal JS SDK with the sandbox Client ID and sends `sandbox_mode: true` to the
+backend, which switches Orders v2 and Payouts v1 to
+`https://api-m.sandbox.paypal.com`. Normal production traffic keeps using the
+live app.
+
+**Demo application accounts**
+
+| Role | Username | Password |
+|---|---|---|
+| Artist (full catalog view) | `demojudge` | `PayPalDemo2026!` |
+| Buyer / fan (optional) | `demobuyer` | `PayPalDemo2026!` |
+
+Guest checkout works without an application account. The PayPal Sandbox buyer
+is already provisioned; credentials and the direct demo-track link are in
+[`TESTING.md`](./TESTING.md). **Verified end-to-end on 2026-11-11:** Orders v2
+create/capture, captured-amount validation, 85/15 ledger and a completed
+PayPal Payouts v1 sandbox batch (`W9B28U85FAL9U`).
+
+Full step-by-step judge flow and troubleshooting: [`TESTING.md`](./TESTING.md).
+
+---
+
+## 🧪 Live Product Walkthrough (Try it in 60 Seconds)
+
+1. **Link a PayPal account or sign in (`/login`):**
    - Visit **[https://exito.cyou/login](https://exito.cyou/login)**.
-   - Select **🎤 Soy Artista / Sello** and click **💳 Iniciar con PayPal (Sincroniza Pagos 85%)** (or **Continuar con Google / Canal YouTube**).
-   - Enter your PayPal email and stage name — your account is created and your PayPal payout destination is immediately verified and synced.
+   - Choose the artist or fan account type, then link a PayPal email and stage name (or continue with Google / YouTube).
+   - Your account is created and the PayPal payout destination is stored for the 85% split.
 2. **Explore the Independent Artist Studio (`/artist-studio`):**
    - **📊 Analytics & Ranking:** Inspect Spotify-for-Artists style telemetry (total streams, `♥` hearts, subscribers, gross sales, 85% net balance, and conversion rates).
    - **🎵 Upload MP3, Lyrics & Albums:** Upload original MP3/WAV tracks with custom cover art, synchronized lyrics, and individual track pricing, or bundle tracks into a full Album.
@@ -112,19 +142,22 @@ paypal-agentic-music-marketplace/
 │   ├── routers/
 │   │   ├── artist_studio.py         # Complete Artist Studio, PayPal Split & Agentic Commerce API
 │   │   ├── ecommerce.py             # PayPal Orders v2 capture & automated 85/15 split trigger
-│   │   ├── auth.py                  # 1-Click PayPal Identity Login, Google OAuth & JWT Auth
+│   │   ├── auth.py                  # PayPal account linking, Google OAuth & JWT Auth
 │   │   ├── youtube.py               # Google / YouTube Channel OAuth2 callback & sync
 │   │   ├── tts_chat.py              # Saori AI Cloud DJ conversational recommendation signals
 │   │   └── stream.py                # 24/7 Cloud Radio & live audio streaming router
 ├── src/
 │   ├── app/
 │   │   ├── page.tsx                 # Main Streaming & Marketplace Discovery Portal (exito.cyou)
-│   │   ├── login/page.tsx           # 1-Click PayPal Identity & Google OAuth Login UI
+│   │   ├── login/page.tsx           # PayPal-linked & Google OAuth Login UI
 │   │   ├── artist-studio/page.tsx   # 5-Tab Independent Artist Studio & PayPal Dashboard
 │   │   ├── channel/[slug]/page.tsx  # Public Artist Channel, Album Storefront & Live Polls
 │   │   └── portal/page.tsx          # Listener Library, Purchases & Playlists Portal
 │   └── components/
 │       └── StreamPlayer.tsx         # Global Audio Player with Heart (♥) Reaction & Lyrics
+├── TESTING.md                       # Judge access, sandbox demo accounts & troubleshooting
+├── DEVPOST_SUBMISSION.md            # Ready-to-paste Devpost copy
+├── DEMO_VIDEO_SCRIPT.md             # English 3-minute demo video script
 ├── CONTRIBUTING.md                  # Open-source contribution guidelines
 ├── CODE_OF_CONDUCT.md               # Community Code of Conduct
 ├── SECURITY.md                      # Security & vulnerability disclosure policy
@@ -135,6 +168,11 @@ paypal-agentic-music-marketplace/
 
 ## 🛠️ Local Development & Self-Hosting
 
+> The hosted demo at `https://exito.cyou` is the primary judge path and includes
+> the seeded catalog. The public repository does not ship the production MySQL
+> catalog or copyrighted audio masters; a local instance starts empty and can be
+> populated from the Artist Studio upload flow. Redis is required for Celery.
+
 ### 1. Clone & Configure Environment
 ```bash
 git clone https://github.com/jonnathanypg/paypal-agentic-music-marketplace.git
@@ -144,9 +182,17 @@ cp .env.example .env
 
 Configure your PayPal and Google credentials in `.env`:
 ```env
-PAYPAL_CLIENT_ID=your_paypal_business_client_id
-PAYPAL_CLIENT_SECRET=your_paypal_business_client_secret
-PAYPAL_MODE=live # or sandbox
+# Live app (normal production checkout)
+PAYPAL_CLIENT_ID=your_live_client_id
+PAYPAL_CLIENT_SECRET=your_live_client_secret
+PAYPAL_MODE=live
+
+# Sandbox app (used by ?sandbox=1)
+PAYPAL_SANDBOX_CLIENT_ID=your_sandbox_client_id
+PAYPAL_SANDBOX_CLIENT_SECRET=your_sandbox_client_secret
+NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID=your_sandbox_client_id
+NEXT_PUBLIC_PAYPAL_CLIENT_ID=your_live_client_id
+
 GOOGLE_CLIENT_ID=your_google_oauth_client_id
 GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
 ```

@@ -144,20 +144,23 @@ def _ensure_artist_profile(user: db_models.User, db: Session) -> db_models.Artis
 def _execute_paypal_payout_or_mock(
     paypal_email: str,
     amount_usd: float,
-    note: str = "Liquidación de regalías Éxito.cyou / MediaSuite"
+    note: str = "Liquidación de regalías Éxito.cyou / MediaSuite",
+    sandbox: bool = False,
 ) -> dict:
     """
     Ejecuta transferencia vía PayPal Payouts API v1 si las credenciales están activas,
     o retorna un comprobante auditable Sandbox/Live para demostración sin fricción.
     """
+    from paypal_runtime import get_paypal_runtime
+
     batch_id = f"PP-PAYOUT-{uuid.uuid4().hex[:10].upper()}"
-    if PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET and paypal_email:
+    paypal_client_id, paypal_client_secret, api_url, paypal_mode = get_paypal_runtime(sandbox)
+    if paypal_client_id and paypal_client_secret and paypal_email:
         try:
-            api_url = "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
             with httpx.Client(timeout=15.0) as client:
                 token_res = client.post(
                     f"{api_url}/v1/oauth2/token",
-                    auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
+                    auth=(paypal_client_id, paypal_client_secret),
                     data={"grant_type": "client_credentials"},
                 )
                 if token_res.status_code == 200:
@@ -192,11 +195,11 @@ def _execute_paypal_payout_or_mock(
                     if res.status_code in (200, 201):
                         data = res.json()
                         real_batch = data.get("batch_header", {}).get("payout_batch_id", batch_id)
-                        return {"success": True, "batch_id": real_batch, "mode": PAYPAL_MODE, "live_api": True}
+                        return {"success": True, "batch_id": real_batch, "mode": paypal_mode, "live_api": paypal_mode == "live"}
         except Exception as e:
             logger.warning(f"PayPal Payout API fallback activado: {e}")
 
-    return {"success": True, "batch_id": batch_id, "mode": PAYPAL_MODE or "sandbox", "live_api": False}
+    return {"success": True, "batch_id": batch_id, "mode": paypal_mode, "live_api": False}
 
 
 def record_artist_sale_and_split(
@@ -207,6 +210,8 @@ def record_artist_sale_and_split(
     purchase_id: Optional[int] = None,
     paypal_order_id: Optional[str] = None,
     sale_channel: str = "web_portal",
+    sandbox: bool = False,
+    artist_slug_override: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Se invoca automáticamente cuando un fan compra una canción o álbum con PayPal:
@@ -220,7 +225,11 @@ def record_artist_sale_and_split(
 
     # Buscar perfil de artista por slug o nombre
     profile = None
-    if media_item.creator_slug:
+    if artist_slug_override:
+        profile = db.query(db_models.ArtistProfile).filter(
+            db_models.ArtistProfile.slug == artist_slug_override
+        ).first()
+    if not profile and media_item.creator_slug:
         profile = db.query(db_models.ArtistProfile).filter(
             db_models.ArtistProfile.slug == media_item.creator_slug
         ).first()
@@ -267,7 +276,8 @@ def record_artist_sale_and_split(
             payout_res = _execute_paypal_payout_or_mock(
                 paypal_email=profile.paypal_email,
                 amount_usd=payout_amount,
-                note=f"Pago automático ({profile.payout_mode}) por venta de '{media_item.title}'"
+                note=f"Pago automático ({profile.payout_mode}) por venta de '{media_item.title}'",
+                sandbox=sandbox,
             )
             if payout_res.get("success"):
                 payout_batch_id = payout_res.get("batch_id")
@@ -1208,6 +1218,7 @@ def delete_artist_album(
 class PayoutWithdrawRequest(BaseModel):
     amount_usd: Optional[float] = None  # None = retirar todo el disponible
     payout_method: str = "paypal"       # paypal | payphone
+    sandbox_mode: bool = False
 
 
 @router.post("/me/payouts/withdraw")
@@ -1240,7 +1251,8 @@ def withdraw_artist_balance(
     payout_res = _execute_paypal_payout_or_mock(
         paypal_email=destination,
         amount_usd=amount,
-        note=f"Retiro de regalías de {profile.display_name} en Éxito.cyou"
+        note=f"Retiro de regalías de {profile.display_name} en Éxito.cyou",
+        sandbox=body.sandbox_mode,
     )
 
     profile.available_balance_usd = round(avail - amount, 2)
@@ -1769,6 +1781,7 @@ class ArtistAgentCommerceChatReq(BaseModel):
     message: str
     channel: str = "web"  # web | whatsapp | telegram
     fan_email: Optional[str] = "fan@exito.cyou"
+    sandbox_mode: bool = False
 
 
 @router.post("/agentic-commerce/chat")
@@ -1817,19 +1830,29 @@ async def artist_agentic_commerce_chat(body: ArtistAgentCommerceChatReq, db: Ses
         db.commit()
 
     # Generar orden PayPal real/sandbox para el track seleccionado si hay intención de compra o recomendación comercial
+    from paypal_runtime import get_paypal_runtime
+
+    sandbox = bool(body.sandbox_mode)
+    paypal_client_id, paypal_client_secret, api_url, paypal_mode = get_paypal_runtime(sandbox)
     paypal_order_id = f"PP-AGENT-{uuid.uuid4().hex[:10].upper()}"
+    paypal_order_is_real = False
     price_usd = float(chosen_track.price_usd or 1.99) if chosen_track else 1.99
     fee_pct = float(profile.platform_fee_percent if profile else 15.0)
     platform_fee = round(price_usd * (fee_pct / 100.0), 2)
     net_artist = round(price_usd - platform_fee, 2)
 
-    if chosen_track and PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET:
+    if sandbox and (not paypal_client_id or not paypal_client_secret):
+        raise HTTPException(
+            status_code=503,
+            detail="Sandbox mode requested, but PAYPAL_SANDBOX_CLIENT_ID / PAYPAL_SANDBOX_CLIENT_SECRET are not configured on the server.",
+        )
+
+    if chosen_track and paypal_client_id and paypal_client_secret:
         try:
-            api_url = "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
             async with httpx.AsyncClient(timeout=10.0) as client:
                 t_res = await client.post(
                     f"{api_url}/v1/oauth2/token",
-                    auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
+                    auth=(paypal_client_id, paypal_client_secret),
                     data={"grant_type": "client_credentials"},
                 )
                 if t_res.status_code == 200:
@@ -1847,6 +1870,7 @@ async def artist_agentic_commerce_chat(body: ArtistAgentCommerceChatReq, db: Ses
                     )
                     if o_res.status_code in (200, 201):
                         paypal_order_id = o_res.json().get("id", paypal_order_id)
+                        paypal_order_is_real = True
         except Exception:
             pass
 
@@ -1886,11 +1910,13 @@ async def artist_agentic_commerce_chat(body: ArtistAgentCommerceChatReq, db: Ses
         } if chosen_track else None,
         "agentic_paypal_checkout": {
             "paypal_order_id": paypal_order_id,
+            "mode": paypal_mode,
+            "is_real_order": paypal_order_is_real,
             "gross_usd": price_usd,
             "platform_fee_usd": platform_fee,
             "artist_net_usd": net_artist,
             "artist_paypal_email": profile.paypal_email if profile else "verified-artist@paypal.com",
             "payout_mode": profile.payout_mode if profile else "instant",
-            "direct_url": f"https://exito.cyou/@{profile.slug if profile else 'billionairesoundtrack'}?buy={chosen_track.id if chosen_track else 1}",
+            "direct_url": f"https://exito.cyou/channel/{profile.slug if profile else 'billionairesoundtrack'}?buy={chosen_track.id if chosen_track else 1}{'&sandbox=1' if sandbox else ''}",
         },
     }

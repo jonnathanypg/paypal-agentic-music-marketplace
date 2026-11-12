@@ -7,6 +7,7 @@ canje de tokens, suscripciones e inyección de metadatos DRM asíncrona.
 """
 
 import os
+import re
 import uuid
 import datetime
 import hashlib
@@ -73,6 +74,10 @@ class PurchaseRequest(BaseModel):
     guest_username: Optional[str] = None
     auto_register: Optional[bool] = False
     order_id: Optional[str] = None
+    # When true, PayPal Orders v2 uses the dedicated Sandbox app credentials.
+    sandbox_mode: Optional[bool] = False
+    # Optional channel/label the buyer is browsing (used for sandbox demo splits).
+    channel_slug: Optional[str] = None
 
 # ══════════════════════════════════════════════════════════════
 #  CATÁLOGO DE MEDIOS
@@ -701,62 +706,78 @@ def make_purchase(req: PurchaseRequest, request: Request, response: Response = N
         if not buyer_email:
             raise HTTPException(status_code=400, detail="Se requiere correo electrónico para facturar")
             
+        # PayPal is never simulated here: a real approved order must be captured.
+        if not req.order_id:
+            raise HTTPException(status_code=400, detail="Se requiere el order_id aprobado de PayPal para completar la compra")
+
+        from paypal_runtime import get_paypal_runtime
+        import httpx
+
+        sandbox = bool(req.sandbox_mode)
+        paypal_client_id, paypal_client_secret, api_url, paypal_mode = get_paypal_runtime(sandbox)
+        if not paypal_client_id or not paypal_client_secret:
+            raise HTTPException(
+                status_code=503,
+                detail="PayPal credentials are not configured for this mode (live/sandbox).",
+            )
+
         tx_id = None
-        # Si se recibe una orden real de PayPal, procedemos a capturarla
-        if req.order_id:
-            from config import PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_MODE
-            import httpx
-            
-            if PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET:
-                try:
-                    # 1. Obtener Token de Acceso de PayPal
-                    api_url = "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
-                    async_client = httpx.Client()
-                    token_res = async_client.post(
-                        f"{api_url}/v1/oauth2/token",
-                        auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
-                        data={"grant_type": "client_credentials"},
-                        timeout=15.0
-                    )
-                    if token_res.status_code == 200:
-                        access_token = token_res.json().get("access_token")
-                        
-                        # 2. Capturar Pago de la Orden de PayPal
-                        headers = {
-                            "Authorization": f"Bearer {access_token}",
-                            "Content-Type": "application/json"
-                        }
-                        capture_res = async_client.post(
-                            f"{api_url}/v2/checkout/orders/{req.order_id}/capture",
-                            headers=headers,
-                            json={},
-                            timeout=15.0
-                        )
-                        
-                        if capture_res.status_code in [200, 201]:
-                            capture_data = capture_res.json()
-                            status = capture_data.get("status")
-                            if status == "COMPLETED":
-                                # Pago capturado con éxito
-                                payments = capture_data.get("purchase_units", [{}])[0].get("payments", {})
-                                captures = payments.get("captures", [{}])
-                                tx_id = captures[0].get("id") or f"PAY-{req.order_id}"
-                            else:
-                                raise HTTPException(status_code=400, detail=f"La orden de PayPal no se completó: Estado={status}")
-                        else:
-                            detail_msg = capture_res.json().get("message", "Error al capturar la orden")
-                            raise HTTPException(status_code=400, detail=f"Fallo en captura de PayPal: {detail_msg}")
+        try:
+            # 1. Obtener Token de Acceso de PayPal
+            async_client = httpx.Client()
+            token_res = async_client.post(
+                f"{api_url}/v1/oauth2/token",
+                auth=(paypal_client_id, paypal_client_secret),
+                data={"grant_type": "client_credentials"},
+                timeout=15.0
+            )
+            if token_res.status_code == 200:
+                access_token = token_res.json().get("access_token")
+
+                # 2. Capturar Pago de la Orden de PayPal
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json"
+                }
+                capture_res = async_client.post(
+                    f"{api_url}/v2/checkout/orders/{req.order_id}/capture",
+                    headers=headers,
+                    json={},
+                    timeout=15.0
+                )
+
+                if capture_res.status_code in [200, 201]:
+                    capture_data = capture_res.json()
+                    status = capture_data.get("status")
+                    if status == "COMPLETED":
+                        # Pago capturado con éxito
+                        payments = capture_data.get("purchase_units", [{}])[0].get("payments", {})
+                        captures = payments.get("captures", [{}])
+                        capture = captures[0] if captures else {}
+                        tx_id = capture.get("id") or f"PAY-{req.order_id}"
+
+                        # 3. Verificar que el monto y la moneda capturados coincidan con el catálogo
+                        captured_value = capture.get("amount", {}).get("value")
+                        captured_currency = capture.get("amount", {}).get("currency_code", "USD")
+                        expected_value = float(media_item.price_usd or 0)
+                        try:
+                            captured_float = float(captured_value)
+                        except (TypeError, ValueError):
+                            raise HTTPException(status_code=400, detail="PayPal no devolvió un monto capturado válido")
+                        if captured_currency != "USD" or abs(captured_float - expected_value) > 0.01:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Monto capturado (${captured_float:.2f} {captured_currency}) no coincide con el precio del track (${expected_value:.2f} USD)",
+                            )
                     else:
-                        raise HTTPException(status_code=500, detail="No se pudo autenticar con PayPal API")
-                except httpx.HTTPError as e:
-                    raise HTTPException(status_code=502, detail=f"Error de red con pasarela de PayPal: {str(e)}")
+                        raise HTTPException(status_code=400, detail=f"La orden de PayPal no se completó: Estado={status}")
+                else:
+                    detail_msg = capture_res.json().get("message", "Error al capturar la orden")
+                    raise HTTPException(status_code=400, detail=f"Fallo en captura de PayPal: {detail_msg}")
             else:
-                # Si las credenciales no están cargadas pero hay un order_id
-                tx_id = f"PAY-{req.order_id}"
-        
-        # Fallback a simulación si no se envió order_id
-        if not tx_id:
-            tx_id = f"PAY-{uuid.uuid4().hex[:16].upper()}"
+                raise HTTPException(status_code=500, detail="No se pudo autenticar con PayPal API")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Error de red con pasarela de PayPal: {str(e)}")
 
         purchase = db_models.Purchase(
             user_id=user.id if user else None,
@@ -774,6 +795,21 @@ def make_purchase(req: PurchaseRequest, request: Request, response: Response = N
         artist_split = None
         try:
             from routers.artist_studio import record_artist_sale_and_split
+
+            # Sandbox-only demo attribution: when a judge buys from the demo
+            # label channel, credit that label profile so the 85/15 ledger is
+            # visible in the demo Artist Studio. Live sales keep the track's
+            # real creator attribution.
+            split_override = None
+            if sandbox and req.channel_slug:
+                channel_norm = re.sub(r"[^a-z0-9]", "", req.channel_slug.lower())
+                if "billionairerecords" in channel_norm:
+                    channel_profile = db.query(db_models.ArtistProfile).filter(
+                        db_models.ArtistProfile.slug == req.channel_slug
+                    ).first()
+                    if channel_profile:
+                        split_override = channel_profile.slug
+
             artist_split = record_artist_sale_and_split(
                 db=db,
                 media_item=media_item,
@@ -782,6 +818,8 @@ def make_purchase(req: PurchaseRequest, request: Request, response: Response = N
                 purchase_id=purchase.id,
                 paypal_order_id=req.order_id or tx_id,
                 sale_channel="web_portal",
+                sandbox=sandbox,
+                artist_slug_override=split_override,
             )
             # Registrar señal de compra (+25) en el Algoritmo de Recomendación
             sig = db_models.UserRecommendationSignal(
@@ -822,20 +860,27 @@ def create_paypal_order(req: PurchaseRequest, db: Session = Depends(get_db)):
     if not media_item:
         raise HTTPException(status_code=404, detail="Recurso no encontrado")
 
-    from config import PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_MODE
+    from paypal_runtime import get_paypal_runtime
     import httpx
 
-    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET:
+    sandbox = bool(req.sandbox_mode)
+    paypal_client_id, paypal_client_secret, api_url, paypal_mode = get_paypal_runtime(sandbox)
+
+    if not paypal_client_id or not paypal_client_secret:
+        if sandbox:
+            raise HTTPException(
+                status_code=503,
+                detail="Sandbox mode requested, but PAYPAL_SANDBOX_CLIENT_ID / PAYPAL_SANDBOX_CLIENT_SECRET are not configured on the server.",
+            )
         # Fallback a simulación si no hay credenciales configuradas
-        return {"success": True, "order_id": f"MOCK_ORD_{uuid.uuid4().hex[:12].upper()}"}
+        return {"success": True, "order_id": f"MOCK_ORD_{uuid.uuid4().hex[:12].upper()}", "mode": "mock"}
 
     try:
-        api_url = "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
         # 1. Obtener token de acceso
         async_client = httpx.Client()
         token_res = async_client.post(
             f"{api_url}/v1/oauth2/token",
-            auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
+            auth=(paypal_client_id, paypal_client_secret),
             data={"grant_type": "client_credentials"},
             timeout=15.0
         )
@@ -867,9 +912,14 @@ def create_paypal_order(req: PurchaseRequest, db: Session = Depends(get_db)):
         )
         if order_res.status_code in [200, 201]:
             order_data = order_res.json()
-            return {"success": True, "order_id": order_data.get("id")}
+            return {"success": True, "order_id": order_data.get("id"), "mode": paypal_mode}
         else:
-            raise HTTPException(status_code=400, detail="No se pudo crear la orden en PayPal")
+            error_detail = "No se pudo crear la orden en PayPal"
+            try:
+                error_detail = order_res.json().get("message") or error_detail
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=error_detail)
             
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Error de red con PayPal: {str(e)}")
@@ -1042,6 +1092,7 @@ class SubscriptionRequest(BaseModel):
     plan_name: str
     payment_method: str = "paypal"
     order_id: Optional[str] = None
+    sandbox_mode: Optional[bool] = False
 
 @router.post("/subscribe")
 def subscribe_to_plan(req: SubscriptionRequest, request: Request, db: Session = Depends(get_db)):
@@ -1060,41 +1111,56 @@ def subscribe_to_plan(req: SubscriptionRequest, request: Request, db: Session = 
         raise HTTPException(status_code=400, detail=f"Plan '{req.plan_name}' no existe")
 
     # Verificar si es pago con PayPal (tiene order_id)
-    if req.payment_method == "paypal" and req.order_id:
-        from config import PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_MODE
+    if req.payment_method == "paypal":
+        if not req.order_id:
+            raise HTTPException(status_code=400, detail="Se requiere el order_id aprobado de PayPal para activar la suscripción")
+        from paypal_runtime import get_paypal_runtime
         import httpx
         tx_id = None
-        if PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET:
-            try:
-                api_url = "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
-                async_client = httpx.Client()
-                token_res = async_client.post(
-                    f"{api_url}/v1/oauth2/token",
-                    auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
-                    data={"grant_type": "client_credentials"},
-                    timeout=15.0
+        sandbox = bool(req.sandbox_mode)
+        paypal_client_id, paypal_client_secret, api_url, paypal_mode = get_paypal_runtime(sandbox)
+        if not paypal_client_id or not paypal_client_secret:
+            raise HTTPException(status_code=503, detail="PayPal credentials are not configured for this mode (live/sandbox).")
+        try:
+            async_client = httpx.Client()
+            token_res = async_client.post(
+                f"{api_url}/v1/oauth2/token",
+                auth=(paypal_client_id, paypal_client_secret),
+                data={"grant_type": "client_credentials"},
+                timeout=15.0
+            )
+            if token_res.status_code == 200:
+                access_token = token_res.json().get("access_token")
+                headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+                capture_res = async_client.post(
+                    f"{api_url}/v2/checkout/orders/{req.order_id}/capture",
+                    headers=headers, json={}, timeout=15.0
                 )
-                if token_res.status_code == 200:
-                    access_token = token_res.json().get("access_token")
-                    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-                    capture_res = async_client.post(
-                        f"{api_url}/v2/checkout/orders/{req.order_id}/capture",
-                        headers=headers, json={}, timeout=15.0
-                    )
-                    if capture_res.status_code in [200, 201]:
-                        capture_data = capture_res.json()
-                        if capture_data.get("status") == "COMPLETED":
-                            payments = capture_data.get("purchase_units", [{}])[0].get("payments", {})
-                            captures = payments.get("captures", [{}])
-                            tx_id = captures[0].get("id") or f"PAY-{req.order_id}"
-                        else:
-                            raise HTTPException(status_code=400, detail=f"PayPal no completó el pago: {capture_data.get('status')}")
+                if capture_res.status_code in [200, 201]:
+                    capture_data = capture_res.json()
+                    if capture_data.get("status") == "COMPLETED":
+                        payments = capture_data.get("purchase_units", [{}])[0].get("payments", {})
+                        captures = payments.get("captures", [{}])
+                        capture = captures[0] if captures else {}
+                        tx_id = capture.get("id") or f"PAY-{req.order_id}"
+                        captured_value = capture.get("amount", {}).get("value")
+                        captured_currency = capture.get("amount", {}).get("currency_code", "USD")
+                        try:
+                            captured_float = float(captured_value)
+                        except (TypeError, ValueError):
+                            raise HTTPException(status_code=400, detail="PayPal no devolvió un monto capturado válido")
+                        if captured_currency != "USD" or abs(captured_float - float(plan["price_usd"])) > 0.01:
+                            raise HTTPException(status_code=400, detail="El monto capturado no coincide con el precio del plan")
                     else:
-                        raise HTTPException(status_code=400, detail="Error capturando pago PayPal")
-            except httpx.HTTPError as e:
-                raise HTTPException(status_code=502, detail=f"Error de red con PayPal: {str(e)}")
+                        raise HTTPException(status_code=400, detail=f"PayPal no completó el pago: {capture_data.get('status')}")
+                else:
+                    raise HTTPException(status_code=400, detail="Error capturando pago PayPal")
+            else:
+                raise HTTPException(status_code=500, detail="No se pudo autenticar con PayPal API")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Error de red con PayPal: {str(e)}")
         if not tx_id:
-            tx_id = f"PAY-{uuid.uuid4().hex[:16].upper()}"
+            raise HTTPException(status_code=400, detail="No se pudo verificar la transacción de PayPal")
 
     now = datetime.datetime.utcnow()
     old_sub = db.query(db_models.Subscription).filter(
@@ -1130,18 +1196,21 @@ def create_subscription_paypal_order(req: SubscriptionRequest, db: Session = Dep
     if not plan:
         raise HTTPException(status_code=400, detail=f"Plan '{req.plan_name}' no existe")
 
-    from config import PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_MODE
+    from paypal_runtime import get_paypal_runtime
     import httpx
 
-    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET:
-        return {"success": True, "order_id": f"MOCK_ORD_{uuid.uuid4().hex[:12].upper()}", "plan": plan["name"], "amount": plan["price_usd"]}
+    sandbox = bool(req.sandbox_mode)
+    paypal_client_id, paypal_client_secret, api_url, paypal_mode = get_paypal_runtime(sandbox)
+    if not paypal_client_id or not paypal_client_secret:
+        if sandbox:
+            raise HTTPException(status_code=503, detail="Sandbox mode requested, but sandbox PayPal credentials are not configured on the server.")
+        return {"success": True, "order_id": f"MOCK_ORD_{uuid.uuid4().hex[:12].upper()}", "plan": plan["name"], "amount": plan["price_usd"], "mode": "mock"}
 
     try:
-        api_url = "https://api-m.paypal.com" if PAYPAL_MODE == "live" else "https://api-m.sandbox.paypal.com"
         async_client = httpx.Client()
         token_res = async_client.post(
             f"{api_url}/v1/oauth2/token",
-            auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
+            auth=(paypal_client_id, paypal_client_secret),
             data={"grant_type": "client_credentials"},
             timeout=15.0
         )
@@ -1165,7 +1234,7 @@ def create_subscription_paypal_order(req: SubscriptionRequest, db: Session = Dep
         )
         if order_res.status_code in [200, 201]:
             order_data = order_res.json()
-            return {"success": True, "order_id": order_data.get("id"), "plan": plan["name"], "amount": plan["price_usd"]}
+            return {"success": True, "order_id": order_data.get("id"), "plan": plan["name"], "amount": plan["price_usd"], "mode": paypal_mode}
         else:
             raise HTTPException(status_code=400, detail="No se pudo crear la orden en PayPal")
     except httpx.HTTPError as e:
@@ -1704,12 +1773,21 @@ def get_creator_profile(slug: str, db: Session = Depends(get_db)):
         }
 
     # Todos los items de este creador o artista independiente
-    all_items = db.query(db_models.MediaCatalog).filter(
-        (db_models.MediaCatalog.creator == creator_name) |
-        (db_models.MediaCatalog.creator_slug == slug) |
-        (db_models.MediaCatalog.artist == creator_name),
-        db_models.MediaCatalog.is_public == True
-    ).all()
+    norm_slug = re.sub(r"[^a-z0-9]", "", (slug or "").lower())
+    is_label_profile = bool(artist_profile and "billionairerecords" in norm_slug)
+    if is_label_profile:
+        # Sello: agrupa todos los canales musicales oficiales (misma vista que el Artist Studio).
+        all_items = db.query(db_models.MediaCatalog).filter(
+            db_models.MediaCatalog.is_public == True,
+            db_models.MediaCatalog.type != "audiobook",
+        ).all()
+    else:
+        all_items = db.query(db_models.MediaCatalog).filter(
+            (db_models.MediaCatalog.creator == creator_name) |
+            (db_models.MediaCatalog.creator_slug == slug) |
+            (db_models.MediaCatalog.artist == creator_name),
+            db_models.MediaCatalog.is_public == True
+        ).all()
     
     songs = [i for i in all_items if i.type == "song"]
     audiobooks = [i for i in all_items if i.type == "audiobook"]

@@ -1,7 +1,8 @@
 "use client";
-import { useState, Suspense } from "react";
+import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { isSandboxMode } from "@/utils/paypalMode";
 
 function AuthPage() {
   const router = useRouter();
@@ -21,7 +22,9 @@ function AuthPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [resetToken, setResetToken] = useState("");
-
+  const [mounted, setMounted] = useState(false);
+  const [sandboxMode, setSandboxMode] = useState(false);
+  const [demoLoading, setDemoLoading] = useState<"artist" | "fan" | null>(null);
   // PayPal Identity Quick-Sync Modal State
   const [showPayPalModal, setShowPayPalModal] = useState(false);
   const [paypalEmail, setPaypalEmail] = useState("");
@@ -48,6 +51,56 @@ function AuthPage() {
     } catch {
       setError("Error conectando con Google OAuth");
       setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setMounted(true);
+    const active = isSandboxMode();
+    setSandboxMode(active);
+    if (active) setMode("login");
+  }, []);
+
+  const isSandbox = (mounted && sandboxMode) || searchParams.get("sandbox") === "1";
+
+  // If the URL already has sandbox=1 (before JS hydration), never show the form.
+  // This avoids a 1-frame flash of the production form before the sandbox state loads.
+  const sandboxByUrl = searchParams.get("sandbox") === "1";
+  const showForm = !isSandbox && !sandboxByUrl;
+
+  const handleDemoLogin = async (role: "artist" | "fan") => {
+    setError("");
+    setSuccess("");
+    setDemoLoading(role);
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: role === "artist" ? "demojudge" : "demobuyer",
+          password: "PayPalDemo2026!",
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAccountType(role);
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem("exito_sandbox_mode", "1");
+          document.cookie = "exito_sandbox_mode=1; path=/; max-age=2592000; SameSite=Lax";
+          if (data.token) {
+            document.cookie = `mediasuite_session=${data.token}; path=/; max-age=2592000; SameSite=Lax`;
+          }
+        }
+        const base = role === "artist" ? "/artist-studio" : "/channel/billionaire-records-demo";
+        const targetUrl = base + (base.includes("?") ? "&" : "?") + "sandbox=1";
+        window.location.href = targetUrl;
+      } else {
+        setError(data.detail || "No se pudo iniciar la cuenta demo");
+      }
+    } catch {
+      setError("Error de conexión");
+    } finally {
+      setDemoLoading(null);
     }
   };
 
@@ -174,10 +227,52 @@ function AuthPage() {
           <p className="text-white/50 text-xs mt-1">
             AI Music Streaming, Independent Artist Studio & PayPal Agentic Marketplace
           </p>
+          {isSandbox && (
+            <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-amber-300">
+              PayPal Sandbox Demo
+            </div>
+          )}
         </div>
 
-        {/* ── Selector de Rol: Artista vs Fan ── */}
-        {mode !== "forgot" && (
+        {/* ── Acceso rápido demo (solo sandbox) ── */}
+        {isSandbox && (
+          <div className="mb-4 space-y-2.5 rounded-3xl border border-white/[0.08] bg-white/[0.03] p-4">
+            <p className="text-center text-[10px] font-bold uppercase tracking-widest text-amber-300/80">
+              Acceso rápido a la demo
+            </p>
+            <button
+              type="button"
+              onClick={() => handleDemoLogin("fan")}
+              disabled={demoLoading !== null}
+              className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#0070ba] to-[#06b6d4] text-white font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2.5 shadow-lg hover:brightness-110 transition-all disabled:opacity-50"
+            >
+              <span className="text-base">🎧</span>
+              <span>{demoLoading === "fan" ? "Entrando como fan..." : "Entrar como Fan"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDemoLogin("artist")}
+              disabled={demoLoading !== null}
+              className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#c9a84c] to-[#e6c565] text-black font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2.5 shadow-lg hover:brightness-105 transition-all disabled:opacity-50"
+            >
+              <span className="text-base">🎤</span>
+              <span>{demoLoading === "artist" ? "Entrando como artista..." : "Entrar como Artista"}</span>
+            </button>
+            <p className="text-center text-[10px] text-white/40">
+              Sin registro · Sin dinero real · PayPal Sandbox
+            </p>
+          </div>
+        )}
+        {isSandbox && (
+          <div className="mt-3 text-center">
+            <Link href="/?sandbox=1" className="text-xs text-white/30 hover:text-white/60 transition-colors">
+              ← Volver a Exito.cyou
+            </Link>
+          </div>
+        )}
+
+        {/* ── Selector de Rol: Artista vs Fan (producción) ── */}
+        {mode !== "forgot" && showForm && (
           <div className="mb-4 bg-white/[0.03] border border-white/[0.08] rounded-2xl p-1.5 grid grid-cols-2 gap-1.5">
             <button
               type="button"
@@ -221,22 +316,9 @@ function AuthPage() {
           </div>
         )}
 
-        {/* ── Botones de Acceso Rápido 1-Clic: PayPal Identity & Google OAuth ── */}
-        {mode !== "forgot" && (
+        {/* ── Acceso rápido de producción (PayPal Identity & Google OAuth) ── */}
+        {mode !== "forgot" && showForm && (
           <div className="space-y-2.5 mb-5">
-            <button
-              type="button"
-              onClick={() => setShowPayPalModal(true)}
-              className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#003087] via-[#0070ba] to-[#009cde] text-white font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2.5 shadow-[0_8px_25px_rgba(0,112,186,0.4)] hover:brightness-110 transition-all border border-cyan-400/30"
-            >
-              <span className="text-base">💳</span>
-              <span>
-                {accountType === "artist"
-                  ? "Iniciar con PayPal (Sincroniza Pagos 85%)"
-                  : "Iniciar con PayPal (Express Checkout 1-Clic)"}
-              </span>
-            </button>
-
             <button
               type="button"
               onClick={handleGoogleLogin}
@@ -278,8 +360,8 @@ function AuthPage() {
           </div>
         )}
 
-        {/* ── Tab Selector ── */}
-        {mode !== "forgot" && (
+        {/* ── Tab Selector (producción) ── */}
+        {mode !== "forgot" && showForm && (
           <div className="flex mb-5 bg-white/[0.03] border border-white/[0.06] rounded-2xl p-1">
             <button
               onClick={() => {
@@ -312,6 +394,7 @@ function AuthPage() {
           </div>
         )}
 
+        {!isSandbox && (
         <div className="bg-white/[0.03] border border-white/[0.06] rounded-3xl p-7 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.5)]">
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === "forgot" ? (
@@ -416,7 +499,7 @@ function AuthPage() {
           </form>
 
           <div className="mt-5 space-y-2.5 text-center">
-            {mode === "login" && (
+            {mode === "login" && !isSandbox && (
               <button
                 onClick={() => {
                   setMode("forgot");
@@ -450,6 +533,7 @@ function AuthPage() {
             </Link>
           </div>
         </div>
+        )}
 
         {/* ── Modal de Sincronización Instantánea con PayPal ── */}
         {showPayPalModal && (

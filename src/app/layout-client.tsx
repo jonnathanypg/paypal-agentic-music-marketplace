@@ -1,4 +1,9 @@
 "use client";
+// NOTE: The MediaSuite production Sidebar is intentionally NOT rendered in this
+// marketplace build (exito.cyou). The Sidebar import below is kept only as a
+// dead import to avoid breaking tree-shaking. It MUST NOT be rendered on any
+// route — not on /artist-studio, /portal, /channel/*, sandbox or live mode.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { Sidebar } from "@/components/sidebar";
 import dynamic from "next/dynamic";
 import { PlayerProvider, usePlayer } from "@/contexts/PlayerContext";
@@ -19,9 +24,7 @@ const ProducerChatSidebar = dynamic(
   { ssr: false }
 );
 
-import UnifiedHeader from "@/components/UnifiedHeader";
-
-const NO_SIDEBAR_PATHS = ['/login', '/'];
+import SandboxBanner from "@/components/SandboxBanner";
 
 // Rutas del dashboard de productores (donde debe aparecer el agente Director)
 const PRODUCER_DASHBOARD_PATHS = [
@@ -181,18 +184,12 @@ function ProducerSidebarController({ pathname }: { pathname: string | null }) {
 function LayoutShell({ children }: { children: React.ReactNode }) {
   const { currentTrack } = usePlayer();
   const pathname = usePathname();
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  // isSidebarOpen kept for future use; sidebar is disabled in this marketplace build
+  const [isSidebarOpen] = useState(false);
 
-  const path = pathname || "";
-
-  const showSidebar = !(
-    ['/', '/login', '/stream', '/portal'].includes(path) ||
-    path.startsWith('/channel/') ||
-    path.startsWith('/@') ||
-    path.startsWith('/admin') ||
-    path.startsWith('/live/join') ||
-    isDevPath(pathname)
-  );
+  // The MediaSuite production Sidebar NEVER renders in this marketplace build (exito.cyou).
+  // Artist Studio (/artist-studio) and Fan Portal (/portal) have their own self-contained
+  // headers — no production sidebar should ever appear or flash on those routes.
 
   useEffect(() => {
     if ("serviceWorker" in navigator) {
@@ -214,22 +211,12 @@ function LayoutShell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      {showSidebar ? (
-        <div className="flex h-dvh overflow-hidden bg-[#0a0a1a] text-[#f0f0f5]">
-          <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} />
-          <div className={`flex-1 flex flex-col min-w-0 overflow-hidden ${playerPadding}`}>
-            <UnifiedHeader onToggleSidebar={() => setIsSidebarOpen(true)} />
-            <main className="flex-1 overflow-y-auto [&::-webkit-scrollbar]:w-[5px] [&::-webkit-scrollbar-thumb]:bg-white/[0.08] [&::-webkit-scrollbar-thumb]:rounded-full">
-              {children}
-            </main>
-          </div>
-        </div>
-      ) : (
-        <div className={`bg-[#0a0a1a] text-[#f0f0f5] min-h-screen ${playerPadding}`}>
-          {children}
-        </div>
-      )}
-      {/* Producer Agent Sidebar — aparece en rutas del dashboard de productores */}
+      {/* No sidebar in this build — marketplace runs fully self-contained */}
+      <div className={`bg-[#0a0a1a] text-[#f0f0f5] min-h-screen ${playerPadding}`}>
+        <SandboxBanner />
+        {children}
+      </div>
+      {/* Producer Agent Sidebar — only visible for super_admin/tools_admin on producer paths */}
       <ProducerSidebarController pathname={pathname} />
     </>
   );

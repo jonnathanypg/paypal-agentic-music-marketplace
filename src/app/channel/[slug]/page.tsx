@@ -23,6 +23,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 const Lottie = dynamic(() => import("lottie-react"), { ssr: false });
 import musicLoadingAnimation from "../../../../public/lotties/music-loading.json";
+import { getPayPalSdkUrl, sandboxModePayload } from "@/utils/paypalMode";
 
 // ─── PayPal Button Wrapper (Real SDK integration) ───────────────────────────
 interface PayPalButtonWrapperProps {
@@ -32,6 +33,7 @@ interface PayPalButtonWrapperProps {
   guestPassword: string;
   autoRegister: boolean;
   isAuthenticated: boolean;
+  channelSlug: string;
   onSuccess: (data: any) => void;
   setProcessing: (b: boolean) => void;
   processing: boolean;
@@ -45,6 +47,7 @@ function PayPalButtonWrapper({
   guestPassword,
   autoRegister,
   isAuthenticated,
+  channelSlug,
   onSuccess,
   setProcessing,
   processing,
@@ -53,97 +56,115 @@ function PayPalButtonWrapper({
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Si no se ha cargado el SDK de PayPal en window, esperar o reintentar
-    const win = window as any;
-    if (!win.paypal || !containerRef.current) return;
+    let intervalId: NodeJS.Timeout;
 
-    containerRef.current.innerHTML = "";
+    const renderPayPal = () => {
+      const win = window as any;
+      if (!win.paypal || !containerRef.current) return false;
 
-    try {
-      win.paypal.Buttons({
-        fundingSource: fundingType === "paypal" ? win.paypal.FUNDING.PAYPAL : win.paypal.FUNDING.CARD,
-        style: {
-          layout: "horizontal",
-          color: fundingType === "paypal" ? "gold" : "black",
-          shape: "rect",
-          tagline: false,
-          height: 48
-        },
-        onClick: (data: any, actions: any) => {
-          // Validar correo en invitados
-          if (!isAuthenticated && !guestEmail.includes("@")) {
-            alert("Por favor ingrese un correo electrónico válido para facturar antes de proceder al pago.");
-            return actions.reject();
-          }
-          return actions.resolve();
-        },
-        createOrder: async () => {
-          setProcessing(true);
-          try {
-            const res = await fetch("/api/ecommerce/paypal/create-order", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                media_catalog_id: checkoutItem.id,
-                payment_method: "paypal",
-                guest_email: !isAuthenticated ? guestEmail : undefined,
-                guest_username: guestUsername || undefined,
-                guest_password: guestPassword || undefined,
-                auto_register: autoRegister && !isAuthenticated
-              })
-            });
-            const data = await res.json();
-            if (res.ok && data.order_id) {
-              return data.order_id;
-            } else {
-              alert(`Error de PayPal: ${data.detail || "No se pudo iniciar la orden"}`);
+      containerRef.current.innerHTML = "";
+
+      try {
+        win.paypal.Buttons({
+          fundingSource: fundingType === "paypal" ? win.paypal.FUNDING.PAYPAL : win.paypal.FUNDING.CARD,
+          style: {
+            layout: "horizontal",
+            color: fundingType === "paypal" ? "gold" : "black",
+            shape: "rect",
+            tagline: false,
+            height: 48
+          },
+          onClick: (data: any, actions: any) => {
+            // Validar correo en invitados
+            if (!isAuthenticated && !guestEmail.includes("@")) {
+              alert("Por favor ingrese un correo electrónico válido para facturar antes de proceder al pago.");
+              return actions.reject();
+            }
+            return actions.resolve();
+          },
+          createOrder: async () => {
+            setProcessing(true);
+            try {
+              const res = await fetch("/api/ecommerce/paypal/create-order", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  media_catalog_id: checkoutItem.id,
+                  payment_method: "paypal",
+                  guest_email: !isAuthenticated ? guestEmail : undefined,
+                  guest_username: guestUsername || undefined,
+                  guest_password: guestPassword || undefined,
+                  auto_register: autoRegister && !isAuthenticated,
+                  ...sandboxModePayload()
+                })
+              });
+              const data = await res.json();
+              if (res.ok && data.order_id) {
+                return data.order_id;
+              } else {
+                alert(`Error de PayPal: ${data.detail || "No se pudo iniciar la orden"}`);
+                setProcessing(false);
+                throw new Error(data.detail);
+              }
+            } catch (e) {
               setProcessing(false);
-              throw new Error(data.detail);
+              throw e;
             }
-          } catch (e) {
-            setProcessing(false);
-            throw e;
-          }
-        },
-        onApprove: async (data: any, actions: any) => {
-          // Capturar pago en backend
-          try {
-            const res = await fetch("/api/ecommerce/purchase", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                media_catalog_id: checkoutItem.id,
-                payment_method: "paypal",
-                guest_email: !isAuthenticated ? guestEmail : undefined,
-                guest_username: guestUsername || guestEmail.split("@")[0],
-                guest_password: guestPassword || undefined,
-                auto_register: autoRegister && !isAuthenticated,
-                order_id: data.orderID // Pasamos la orden aprobada para capturar
-              })
-            });
-            const result = await res.json();
-            if (res.ok && result.success) {
-              onSuccess(result);
-            } else {
-              alert(`Fallo al capturar pago: ${result.detail || "Intente de nuevo"}`);
+          },
+          onApprove: async (data: any, actions: any) => {
+            // Capturar pago en backend
+            try {
+              const res = await fetch("/api/ecommerce/purchase", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  media_catalog_id: checkoutItem.id,
+                  payment_method: "paypal",
+                  guest_email: !isAuthenticated ? guestEmail : undefined,
+                  guest_username: guestUsername || guestEmail.split("@")[0],
+                  guest_password: guestPassword || undefined,
+                  auto_register: autoRegister && !isAuthenticated,
+                  order_id: data.orderID, // Pasamos la orden aprobada para capturar
+                  channel_slug: channelSlug,
+                  ...sandboxModePayload()
+                })
+              });
+              const result = await res.json();
+              if (res.ok && result.success) {
+                onSuccess(result);
+              } else {
+                alert(`Fallo al capturar pago: ${result.detail || "Intente de nuevo"}`);
+              }
+            } catch {
+              alert("Error de conexión al confirmar pago");
+            } finally {
+              setProcessing(false);
             }
-          } catch {
-            alert("Error de conexión al confirmar pago");
-          } finally {
+          },
+          onCancel: () => {
+            setProcessing(false);
+          },
+          onError: (err: any) => {
+            console.error("PayPal Error:", err);
             setProcessing(false);
           }
-        },
-        onCancel: () => {
-          setProcessing(false);
-        },
-        onError: (err: any) => {
-          console.error("PayPal Error:", err);
-          setProcessing(false);
-        }
-      }).render(containerRef.current).catch((e: any) => console.error(e));
-    } catch (e) {
-      console.error("Failed to render PayPal Buttons:", e);
+        }).render(containerRef.current).catch((e: any) => console.error(e));
+        return true;
+      } catch (e) {
+        console.error("Failed to render PayPal Buttons:", e);
+        return false;
+      }
+    };
+
+    if (!renderPayPal()) {
+      intervalId = setInterval(() => {
+        if (renderPayPal()) clearInterval(intervalId);
+      }, 500);
     }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [checkoutItem.id, guestEmail, guestUsername, guestPassword, autoRegister, isAuthenticated, fundingType]);
 
   return <div ref={containerRef} />;
@@ -314,7 +335,9 @@ export default function CreatorChannelPage({
 
   useEffect(() => {
     if (typeof window !== "undefined" && slug) {
-      window.history.replaceState({}, "", `/@${slug}`);
+      // Preserve query params (e.g. ?buy=<track_id>&sandbox=1) from agentic links.
+      const search = window.location.search || "";
+      window.history.replaceState({}, "", `/@${slug}${search}`);
     }
   }, [slug]);
   const [activeTab, setActiveTab] = useState<"overview" | "albums" | "tracks" | "audiobooks">("overview");
@@ -447,13 +470,40 @@ export default function CreatorChannelPage({
     }
   }, [userInfo]);
 
-  // Cargar SDK de PayPal dinámicamente si no está en el window
+  // Open the checkout modal when arriving from an agentic share link
+  // (e.g. /channel/<slug>?buy=<track_id>&sandbox=1).
+  const autoCheckoutRef = useRef<string | null>(null);
   useEffect(() => {
-    if (typeof window !== "undefined" && !document.getElementById("paypal-sdk-script")) {
+    if (allTracks.length === 0) return;
+    const params = new URLSearchParams(window.location.search);
+    const buyId = params.get("buy");
+    if (!buyId || autoCheckoutRef.current === buyId) return;
+    const track = allTracks.find((t) => String(t.id) === buyId);
+    if (!track) return;
+    autoCheckoutRef.current = buyId;
+    params.delete("buy");
+    const qs = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
+    queueMicrotask(() => handleCheckout(track));
+  }, [allTracks, handleCheckout]);
+
+  // Cargar SDK de PayPal dinámicamente si no está en el window.
+  // En modo demo (?sandbox=1) usa NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID.
+  useEffect(() => {
+    const sdkUrl = getPayPalSdkUrl();
+    if (!sdkUrl) {
+      console.warn("Sandbox demo mode is enabled, but NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID is not configured on this build.");
+      return;
+    }
+    const existing = document.getElementById("paypal-sdk-script") as HTMLScriptElement | null;
+    if (existing && existing.src !== sdkUrl) {
+      existing.remove();
+      delete (window as any).paypal;
+    }
+    if (!document.getElementById("paypal-sdk-script")) {
       const script = document.createElement("script");
       script.id = "paypal-sdk-script";
-      const clientId = "AUYxLqb4aKaVxE9Rd4l7ZmsmOD3EwFzCm5_qj9esAgDlvqUutzP5aomnhRFbWFg4s5vnJ14IOvMeY6in";
-      script.src = `https://www.paypal.com/sdk/js?client-id=${clientId}&currency=USD&disable-funding=credit`;
+      script.src = sdkUrl;
       script.async = true;
       document.body.appendChild(script);
     }
@@ -475,6 +525,8 @@ export default function CreatorChannelPage({
           guest_password: guestPassword || undefined,
           auto_register: autoRegister && !userInfo.authenticated,
           order_id: orderId || undefined,
+          channel_slug: slug,
+          ...sandboxModePayload(),
         }),
       });
       const data = await res.json();
@@ -574,16 +626,51 @@ export default function CreatorChannelPage({
 
 
       {/* ─── USER BADGE (top right) ─────────────────────────────────────── */}
-      {userInfo.authenticated && userInfo.user && (
-        <div className="fixed top-4 right-4 z-30 group">
-          <div className={`flex items-center gap-2 bg-black/60 backdrop-blur-xl border border-white/[0.08] rounded-full h-10 text-white/60 text-sm overflow-hidden transition-all duration-300 ${isScrolled ? 'w-10 px-0 justify-center group-hover:w-auto group-hover:px-4' : 'w-auto px-4'}`}>
-            <IconToken size={12} className="shrink-0" />
-            <span className={`whitespace-nowrap flex gap-1 font-bold text-white transition-opacity duration-300 ${isScrolled ? 'opacity-0 group-hover:opacity-100 hidden group-hover:flex' : 'opacity-100 flex'}`}>
-              {userInfo.user.tokens_balance} <span className="text-white/40">tokens</span>
-            </span>
+      <div className="fixed top-4 right-4 z-30 flex items-center gap-2">
+        {userInfo.authenticated && userInfo.user ? (
+          <div className="flex items-center gap-2">
+            <Link
+              href="/portal"
+              className="flex items-center gap-2 bg-black/60 backdrop-blur-xl border border-white/[0.08] hover:border-purple-500/40 rounded-full h-10 px-3.5 text-white/80 hover:text-white text-xs font-bold transition-all shadow-lg"
+              title="Ir a mi Portal de Fan"
+            >
+              <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#7c3aed] to-[#06b6d4] flex items-center justify-center text-[10px] text-white font-black">
+                {userInfo.user.username.charAt(0).toUpperCase()}
+              </div>
+              <span className="hidden sm:inline">{userInfo.user.username}</span>
+              <span className="flex items-center gap-1 text-amber-300 ml-1">
+                <IconToken size={11} className="shrink-0" />
+                <span>{userInfo.user.tokens_balance}</span>
+              </span>
+            </Link>
+
+            <button
+              onClick={async () => {
+                await fetch("/api/auth/logout", { method: "POST" });
+                window.location.reload();
+              }}
+              className="flex items-center justify-center w-10 h-10 rounded-full bg-black/60 backdrop-blur-xl border border-white/[0.08] hover:border-rose-500/40 text-white/40 hover:text-rose-400 transition-all shadow-lg"
+              title="Cerrar Sesión"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+            </button>
           </div>
-        </div>
-      )}
+        ) : (
+          <Link
+            href="/login"
+            className="flex items-center gap-1.5 bg-black/60 backdrop-blur-xl border border-white/[0.08] hover:border-purple-500/40 rounded-full h-10 px-4 text-white/70 hover:text-white text-xs font-bold transition-all shadow-lg"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
+            </svg>
+            <span>Iniciar Sesión</span>
+          </Link>
+        )}
+      </div>
 
       {/* ─── HERO BANNER ───────────────────────────────────────────────── */}
       <div className="relative overflow-hidden">
@@ -1345,6 +1432,7 @@ export default function CreatorChannelPage({
                       guestPassword={guestPassword}
                       autoRegister={autoRegister}
                       isAuthenticated={userInfo.authenticated}
+                      channelSlug={slug}
                       onSuccess={(data: any) => setPurchaseSuccess(data)}
                       setProcessing={setProcessing}
                       processing={processing}

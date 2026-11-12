@@ -17,6 +17,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { ExitoLogoIcon } from "@/components/ExitoLogo";
+import { isSandboxMode } from "@/utils/paypalMode";
+import { setAgentPageContext } from "@/utils/agentPageContext";
 
 type TabType = "overview" | "catalog" | "paypal" | "agent" | "community";
 
@@ -87,6 +89,9 @@ export default function ArtistStudioPage() {
   const [notifSubject, setNotifSubject] = useState("");
   const [notifMessage, setNotifMessage] = useState("");
   const [convertAmount, setConvertAmount] = useState("5.00");
+
+  // ── Retiro / Withdrawal ──
+  const [withdrawAmount, setWithdrawAmount] = useState("");
 
   // ── Gestión Avanzada de Catálogo: Canal Activo, Sub-vistas, Búsqueda y Modales de Edición ──
   const [selectedChannel, setSelectedChannel] = useState<string>("all");
@@ -174,6 +179,49 @@ export default function ArtistStudioPage() {
   useEffect(() => {
     fetchStudio(selectedChannel);
   }, [fetchStudio, selectedChannel]);
+
+  // Contexto para el copiloto Saori: sabe que el usuario es artista y en qué
+  // sección del Artist Studio está. También atiende navegaciones del agente.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setAgentPageContext({
+      module: "artist-studio",
+      section: activeTab,
+      title: "Artist Studio & PayPal Marketplace",
+      path: "/artist-studio",
+      artist_slug: slug || undefined,
+    });
+    try {
+      sessionStorage.setItem("exito_user_role", "artist");
+    } catch {}
+  }, [activeTab, slug]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const validTabs: TabType[] = ["overview", "catalog", "paypal", "agent", "community"];
+
+    const applyTab = (value: unknown) => {
+      const tab = String(value || "");
+      if (validTabs.includes(tab as TabType)) {
+        setActiveTab(tab as TabType);
+      }
+    };
+
+    try {
+      const pending = sessionStorage.getItem("exito_studio_tab");
+      if (pending) {
+        applyTab(pending);
+        sessionStorage.removeItem("exito_studio_tab");
+      }
+    } catch {}
+
+    const onNavigate = (event: Event) => {
+      const detail = (event as CustomEvent).detail || {};
+      applyTab(detail.section);
+    };
+    window.addEventListener("exito:navigate-section", onNavigate);
+    return () => window.removeEventListener("exito:navigate-section", onNavigate);
+  }, []);
 
   const handleUploadProfileImage = async (file: File, imageType: "avatar" | "banner") => {
     setUploadingAvatar(true);
@@ -460,14 +508,20 @@ export default function ArtistStudioPage() {
   };
 
   const handleWithdrawPayPal = async (method: "paypal" | "payphone" = "paypal") => {
+    const parsedAmount = parseFloat(withdrawAmount);
+    const body: Record<string, unknown> = { payout_method: method, sandbox_mode: isSandboxMode() };
+    if (withdrawAmount && !isNaN(parsedAmount) && parsedAmount > 0) {
+      body.amount_usd = parsedAmount;
+    }
     const res = await fetch("/api/artist-studio/me/payouts/withdraw", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payout_method: method }),
+      body: JSON.stringify(body),
     });
     const d = await res.json();
     if (res.ok) {
       showToast(`💸 ${d.message}`);
+      setWithdrawAmount("");
       fetchStudio();
     } else {
       showToast(`⚠️ ${d.detail || "No se pudo procesar el retiro"}`);
@@ -514,6 +568,7 @@ export default function ArtistStudioPage() {
           artist_slug: slug || "billionairesoundtrack",
           message: agentChatInput,
           channel: "whatsapp",
+          sandbox_mode: isSandboxMode(),
         }),
       });
       const d = await res.json();
@@ -577,6 +632,10 @@ export default function ArtistStudioPage() {
   const payouts = studioData?.payouts || [];
   const polls = studioData?.polls || [];
   const subscribers = studioData?.subscribers || [];
+
+  const maxAmount = Number(profile.available_balance_usd || 0);
+  const parsedWithdraw = parseFloat(withdrawAmount);
+  const isValidAmount = !isNaN(parsedWithdraw) && parsedWithdraw > 0 && parsedWithdraw <= maxAmount;
 
   return (
     <div className="min-h-screen bg-[#070510] text-white pb-20">
@@ -673,6 +732,21 @@ export default function ArtistStudioPage() {
             >
               Mi Cuenta Fan
             </Link>
+            <button
+              onClick={async () => {
+                await fetch("/api/auth/logout", { method: "POST" });
+                window.location.href = "/login";
+              }}
+              className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-xs font-bold text-rose-300 transition flex items-center gap-1.5"
+              title="Cerrar sesión"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              <span>Salir</span>
+            </button>
           </div>
         </div>
 
@@ -749,6 +823,44 @@ export default function ArtistStudioPage() {
                 <p className="text-[11px] text-zinc-400 mt-2">
                   Neto artista: ${Number(profile.lifetime_net_earnings_usd || 0).toFixed(2)} • Fee (15%): ${Number(profile.lifetime_platform_fees_usd || 0).toFixed(2)}
                 </p>
+              </div>
+            </div>
+
+            {/* ── Retiro Rápido de Saldo (Withdraw) — Acceso prominente desde Analytics ── */}
+            <div className="p-5 rounded-2xl bg-gradient-to-br from-emerald-900/30 to-teal-900/20 border border-emerald-500/30 flex flex-col sm:flex-row sm:items-center gap-4">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-zinc-400 uppercase tracking-wider mb-1">Retirar Saldo a PayPal</p>
+                <p className="text-sm text-emerald-300 font-semibold">
+                  Balance disponible: <span className="text-white font-extrabold">${maxAmount.toFixed(2)} USD</span>
+                </p>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Ingresa el monto a retirar (máx: ${maxAmount.toFixed(2)})
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="number"
+                  min={0.01}
+                  max={maxAmount}
+                  step={0.01}
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
+                  placeholder={`0.00`}
+                  className="w-32 px-3 py-2 rounded-xl bg-black/50 border border-emerald-400/40 text-white text-sm font-bold outline-none focus:border-emerald-400"
+                />
+                <button
+                  onClick={() => handleWithdrawPayPal("paypal")}
+                  disabled={!isValidAmount}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-sm font-bold text-white transition whitespace-nowrap"
+                >
+                  💸 Retirar a PayPal
+                </button>
+                <button
+                  onClick={() => setActiveTab("paypal")}
+                  className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-semibold text-zinc-200 transition"
+                >
+                  ⚙️ Configurar
+                </button>
               </div>
             </div>
 
@@ -1654,11 +1766,40 @@ export default function ArtistStudioPage() {
                   >
                     Guardar Preferencias de Pago PayPal
                   </button>
+                </div>
+
+                {/* Sección de Retiro Manual con Monto */}
+                <div className="mt-4 p-4 rounded-xl bg-emerald-900/20 border border-emerald-500/30 space-y-3">
+                  <div>
+                    <p className="text-sm font-bold text-emerald-300">💸 Retirar Saldo a PayPal</p>
+                    <p className="text-xs text-zinc-300 mt-0.5">
+                      Balance disponible: <span className="font-extrabold text-white">${maxAmount.toFixed(2)} USD</span>
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-zinc-400">Monto a retirar (USD)</label>
+                    <input
+                      type="number"
+                      min={0.01}
+                      max={maxAmount}
+                      step={0.01}
+                      value={withdrawAmount}
+                      onChange={(e) => setWithdrawAmount(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full px-3 py-2 rounded-xl bg-black/50 border border-emerald-400/40 text-white text-sm font-bold outline-none focus:border-emerald-400"
+                    />
+                    {withdrawAmount && !isValidAmount && (
+                      <p className="text-[11px] text-rose-400">
+                        Ingresa un monto mayor a 0 y menor o igual a ${maxAmount.toFixed(2)}.
+                      </p>
+                    )}
+                  </div>
                   <button
                     onClick={() => handleWithdrawPayPal("paypal")}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white transition"
+                    disabled={!isValidAmount}
+                    className="w-full px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-sm font-bold text-white transition"
                   >
-                    💸 Retirar Saldo Ahora a mi PayPal (${Number(profile.available_balance_usd || 0).toFixed(2)} USD)
+                    💸 Retirar ${isValidAmount ? parsedWithdraw.toFixed(2) : "0.00"} USD a PayPal
                   </button>
                 </div>
               </div>

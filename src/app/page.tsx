@@ -26,6 +26,7 @@ const Lottie = dynamic(() => import("lottie-react"), { ssr: false });
 import musicLoadingAnimation from "../../public/lotties/music-loading.json";
 import navigationAnimation from "../../public/lotties/Navegation-Creator-music.json";
 import ExitoLogo, { ExitoLogoIcon } from "@/components/ExitoLogo";
+import { getPayPalSdkUrl, sandboxModePayload } from "@/utils/paypalMode";
 
 
 // ─── Tipos ────────────────────────────────────────────────────────────────
@@ -265,14 +266,15 @@ function PayPalButtonWrapper({
               ? "/api/ecommerce/paypal/create-subscription-order"
               : "/api/ecommerce/paypal/create-order";
             const orderBody = checkoutPlan
-              ? { plan_name: checkoutPlan, payment_method: "paypal" }
+              ? { plan_name: checkoutPlan, payment_method: "paypal", ...sandboxModePayload() }
               : {
                   media_catalog_id: checkoutItem.id,
                   payment_method: "paypal",
                   guest_email: !isAuthenticated ? guestEmail : undefined,
                   guest_username: guestUsername || undefined,
                   guest_password: guestPassword || undefined,
-                  auto_register: autoRegister && !isAuthenticated
+                  auto_register: autoRegister && !isAuthenticated,
+                  ...sandboxModePayload()
                 };
             const res = await fetch(orderEndpoint, {
               method: "POST",
@@ -305,7 +307,8 @@ function PayPalButtonWrapper({
                 guest_username: guestUsername || guestEmail.split("@")[0],
                 guest_password: guestPassword || undefined,
                 auto_register: autoRegister && !isAuthenticated,
-                order_id: data.orderID // Pasamos la orden aprobada para capturar
+                order_id: data.orderID, // Pasamos la orden aprobada para capturar
+                ...sandboxModePayload()
               })
             });
             const result = await res.json();
@@ -753,14 +756,24 @@ export default function StreamPortal() {
 
   const heroRef = useRef<HTMLDivElement>(null);
 
-  // Cargar SDK de PayPal dinámicamente solo si el usuario abre el checkout
+  // Cargar SDK de PayPal dinámicamente solo si el usuario abre el checkout.
+  // En modo demo (?sandbox=1) usa NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID.
   useEffect(() => {
     if (!checkoutItem) return;
-    if (typeof window !== "undefined" && !document.getElementById("paypal-sdk-script")) {
+    const sdkUrl = getPayPalSdkUrl();
+    if (!sdkUrl) {
+      alert("Sandbox demo mode is enabled, but NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID is not configured on this build.");
+      return;
+    }
+    const existing = document.getElementById("paypal-sdk-script") as HTMLScriptElement | null;
+    if (existing && existing.src !== sdkUrl) {
+      existing.remove();
+      delete (window as any).paypal;
+    }
+    if (!document.getElementById("paypal-sdk-script")) {
       const script = document.createElement("script");
       script.id = "paypal-sdk-script";
-      const clientId = "AUYxLqb4aKaVxE9Rd4l7ZmsmOD3EwFzCm5_qj9esAgDlvqUutzP5aomnhRFbWFg4s5vnJ14IOvMeY6in";
-      script.src = `https://www.paypal.com/sdk/js?client-id=${clientId}&currency=USD&disable-funding=credit`;
+      script.src = sdkUrl;
       script.async = true;
       document.body.appendChild(script);
     }
@@ -1290,6 +1303,7 @@ export default function StreamPortal() {
           plan_name: checkoutPlan,
           payment_method: paymentMethod,
           order_id: orderId || undefined,
+          ...sandboxModePayload(),
         } : {
           media_catalog_id: checkoutItem.id,
           payment_method: paymentMethod,
@@ -1298,6 +1312,7 @@ export default function StreamPortal() {
           guest_password: guestPassword || undefined,
           auto_register: autoRegister && !userInfo.authenticated,
           order_id: orderId || undefined,
+          ...sandboxModePayload(),
         }),
       });
       const data = await res.json();

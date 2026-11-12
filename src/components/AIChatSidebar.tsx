@@ -16,6 +16,7 @@ import { useRouter } from "next/navigation";
 import { usePlayer } from "@/contexts/PlayerContext";
 import { useDJ } from "@/contexts/DJContext";
 import { ExitoLogoIcon } from "@/components/ExitoLogo";
+import { deriveModule, getAgentPageContext } from "@/utils/agentPageContext";
 import type { Track } from "./StreamPlayer";
 
 
@@ -116,11 +117,47 @@ const IconHeadphones = ({ size = 20 }: { size?: number }) => (
   </svg>
 );
 
-const INITIAL_MESSAGE: Message = {
-  id: "init",
-  sender: "bot",
-  text: "¡Hola! Soy Saori, tu guía de Éxito.cyou — la plataforma de programación mental auditiva y bienestar.\n\nSintoniza tu mente y crea tu realidad. Puedo ayudarte a:\n• Sintonizar música por estado mental (enfoque, calma, sueño, motivación)\n• Reproducir frecuencias Solfeggio y ondas binaurales\n• Mezclar en vivo como tu DJ Co-Pilot en la cabina virtual\n• Explicar el significado, decretos y letras de cada pista\n• Gestionar tus descargas y membresía oficial\n\n¿Qué estado mental deseas potenciar hoy?",
-};
+const CHAT_STORAGE_KEY = "mediasuite_chat_messages_v2";
+
+function buildInitialMessage(): Message {
+  const path = typeof window !== "undefined" ? window.location.pathname : "/";
+  let storedRole = "";
+  try {
+    storedRole = sessionStorage.getItem("exito_user_role") || "";
+  } catch {}
+  const isArtist = path.startsWith("/artist-studio") || storedRole === "artist";
+
+  if (isArtist) {
+    return {
+      id: "init",
+      sender: "bot",
+      text:
+        "¡Hola! Soy Saori, tu copiloto en el Artist Studio de Éxito.cyou.\n\n" +
+        "Puedo analizar tu cuenta y ayudarte a gestionar tu música y tus ingresos:\n" +
+        "• Analizar tus ventas, saldo y retiros de PayPal\n" +
+        "• Abrir tu catálogo, tus álbumes y tus precios\n" +
+        "• Revisar tu audiencia, suscriptores y votaciones\n" +
+        "• Configurar tu agente de ventas y WhatsApp\n" +
+        "• Controlar la reproducción y explicar tus letras\n\n" +
+        "¿Quieres un análisis de tu cuenta o abrir alguna sección?",
+    };
+  }
+
+  const isFan = path.startsWith("/portal");
+  return {
+    id: "init",
+    sender: "bot",
+    text:
+      "¡Hola! Soy Saori, tu copiloto musical en Éxito.cyou.\n\n" +
+      "Puedo ayudarte a:\n" +
+      "• Recomendarte música según tu estado de ánimo\n" +
+      "• Reproducir pistas y controlar el reproductor\n" +
+      "• Explicar la letra y el significado de cada canción\n" +
+      "• Comprar y descargar música con PayPal\n" +
+      (isFan ? "• Abrir tu biblioteca, compras y descargas\n" : "") +
+      "\n¿Qué te gustaría escuchar hoy?",
+  };
+}
 
 
 export default function AIChatSidebar({
@@ -147,23 +184,23 @@ export default function AIChatSidebar({
         if (savedTime) {
           const timeDiff = Date.now() - parseInt(savedTime, 10);
           if (timeDiff > 24 * 60 * 60 * 1000) {
-            sessionStorage.removeItem("mediasuite_chat_messages");
+            sessionStorage.removeItem(CHAT_STORAGE_KEY);
             localStorage.removeItem("mediasuite_chat_messages_timestamp");
-            return [INITIAL_MESSAGE];
+            return [buildInitialMessage()];
           }
         }
-        const saved = sessionStorage.getItem("mediasuite_chat_messages");
+        const saved = sessionStorage.getItem(CHAT_STORAGE_KEY);
         if (saved) {
           return JSON.parse(saved);
         }
       } catch (e) {}
     }
-    return [INITIAL_MESSAGE];
+    return [buildInitialMessage()];
   });
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      sessionStorage.setItem("mediasuite_chat_messages", JSON.stringify(messages));
+      sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
       if (messages.length > 1 && !localStorage.getItem("mediasuite_chat_messages_timestamp")) {
         localStorage.setItem("mediasuite_chat_messages_timestamp", Date.now().toString());
       }
@@ -173,6 +210,37 @@ export default function AIChatSidebar({
   const [loading, setLoading] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [isListening, setIsListening] = useState(false);
+
+  // ── Identidad real del usuario para el copiloto (fan, artista o invitado) ──
+  const [accountRole, setAccountRole] = useState<"artist" | "fan" | "guest">("guest");
+  const [accountName, setAccountName] = useState("");
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let cancelled = false;
+    fetch("/api/ecommerce/me/info")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled) return;
+        if (data?.authenticated && data?.user) {
+          setAccountName(data.user.username || "");
+          let storedRole = "";
+          try {
+            storedRole = sessionStorage.getItem("exito_user_role") || "";
+          } catch {}
+          const isArtist =
+            storedRole === "artist" || window.location.pathname.startsWith("/artist-studio");
+          setAccountRole(isArtist ? "artist" : "fan");
+        } else {
+          setAccountRole("guest");
+          setAccountName("");
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ── Rating de satisfacción ──
   const [showRating, setShowRating] = useState(false);
@@ -365,6 +433,24 @@ export default function AIChatSidebar({
           creator_name: creatorContext?.name || "",
           creator_type: creatorContext?.type || "",
           creator_language: creatorContext?.language || "",
+          // Copiloto: identidad real + ubicación exacta en la interfaz
+          user_role: accountRole,
+          page_context: (() => {
+            const path = typeof window !== "undefined" ? window.location.pathname : "/";
+            const stored = getAgentPageContext();
+            return {
+              module: deriveModule(path),
+              section: stored.section || "",
+              title: stored.title || "",
+              path,
+              artist_slug: stored.artist_slug || creatorContext?.slug || "",
+            };
+          })(),
+          ui_state: {
+            chat_open: isOpen,
+            player: currentTrack ? "playing" : "idle",
+            user_name: accountName,
+          },
         }),
       });
 
@@ -397,6 +483,28 @@ export default function AIChatSidebar({
         }
         // Redireccionar al perfil del creador/artista de manera fluida preservando el reproductor de audio
         router.push(`/channel/${actionData.slug}`);
+      } else if (action === "navigate" && (actionData.path || actionData.url)) {
+        // Navegación controlada por el copiloto (paneles, portal, sandbox)
+        const targetPath = String(actionData.path || actionData.url || "/");
+        const targetSection = String(actionData.section || "");
+        if (targetPath.startsWith("/artist-studio")) {
+          if (targetSection) {
+            try {
+              sessionStorage.setItem("exito_studio_tab", targetSection);
+            } catch {}
+          }
+          if (typeof window !== "undefined" && window.location.pathname.startsWith("/artist-studio")) {
+            window.dispatchEvent(
+              new CustomEvent("exito:navigate-section", {
+                detail: { path: targetPath, section: targetSection },
+              })
+            );
+          } else {
+            router.push("/artist-studio");
+          }
+        } else {
+          router.push(targetPath);
+        }
       } else if (action === "play_first" && catalog.length) {
         setTimeout(() => onPlay(catalog[0]), 500);
       } else if (action === "filter" && actionData.type) {
@@ -447,7 +555,7 @@ export default function AIChatSidebar({
     } finally {
       setLoading(false);
     }
-  }, [catalog, currentTrack, loading, messages, creatorContext, onPlay, onFilter, onCheckout, onShowLyrics, speakResponse, router, maybeShowRating]);
+  }, [catalog, currentTrack, loading, messages, creatorContext, accountRole, accountName, isOpen, onPlay, onFilter, onCheckout, onShowLyrics, speakResponse, router, maybeShowRating]);
 
   const startListening = useCallback(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -871,8 +979,8 @@ export default function AIChatSidebar({
               </button>
               <button
                 onClick={() => {
-                  setMessages([INITIAL_MESSAGE]);
-                  sessionStorage.removeItem("mediasuite_chat_messages");
+                  setMessages([buildInitialMessage()]);
+                  sessionStorage.removeItem(CHAT_STORAGE_KEY);
                   localStorage.removeItem("mediasuite_chat_messages_timestamp");
                   cancelCurrentAudio();
                   setShowClearModal(false);

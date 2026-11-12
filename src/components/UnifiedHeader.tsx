@@ -98,10 +98,10 @@ export default function UnifiedHeader({ onToggleSidebar }: UnifiedHeaderProps) {
           {getPageTitle()}
         </h2>
         <div className="lg:hidden flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#7c3aed] to-[#06b6d4] flex items-center justify-center text-white font-black text-xs">
-            M
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#c9a84c] via-[#7c3aed] to-[#0070ba] flex items-center justify-center text-white font-black text-xs">
+            E
           </div>
-          <span className="text-sm font-black text-white">MediaSuite</span>
+          <span className="text-sm font-black text-white">Éxito.cyou</span>
         </div>
       </div>
 

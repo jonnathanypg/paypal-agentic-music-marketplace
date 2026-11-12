@@ -337,8 +337,8 @@ function PortalContent() {
       <header className="border-b border-white/[0.04] bg-[#0d0d1f]/50 backdrop-blur-md">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#7c3aed] to-[#06b6d4] flex items-center justify-center text-white font-black text-sm">M</div>
-            <span className="text-sm font-black text-white">MediaSuite</span>
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#c9a84c] via-[#7c3aed] to-[#0070ba] flex items-center justify-center text-white font-black text-sm">E</div>
+            <span className="text-sm font-black text-white">Éxito.cyou</span>
           </Link>
           <nav className="flex items-center gap-4">
             <Link href="/artist-studio" className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-purple-600/20 transition">
