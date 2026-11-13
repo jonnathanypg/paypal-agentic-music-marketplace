@@ -188,6 +188,9 @@ Notes:
 - The repository does not ship the production MySQL catalog or copyrighted
   audio masters; the seed script uses metadata only (and a 3-second generated
   tone when `ffmpeg` is available).
+- The backend mounts `/media-static` (from `backend/media_library`) and
+  `/uploads` itself, plus `/api/covers`, so playback and cover generation work
+  locally without nginx or any external service.
 - Local sandbox checkout requires `PAYPAL_SANDBOX_CLIENT_ID` /
   `PAYPAL_SANDBOX_CLIENT_SECRET` on the backend and
   `NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID` at build time.

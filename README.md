@@ -219,7 +219,12 @@ falls back to when the API is empty), the `demojudge` / `demobuyer` /
 `demoartist` accounts (password `PayPalDemo2026!`) and the
 `billionaire-records-demo` artist profile used by the sandbox walkthrough.
 Without it, the UI shows mock tracks but `POST /api/ecommerce/paypal/create-order`
-returns `404 Recurso no encontrado`, so PayPal never opens.
+returns `404 Recurso no encontrado`, so PayPal never opens. When `ffmpeg` is
+available the script also generates short demo audio under
+`backend/media_library/seed`.
+
+The backend serves `/media-static` (and `/uploads`) itself, so audio playback
+works locally without nginx or any external media server.
 
 ### 4. Start Frontend (Next.js)
 ```bash
