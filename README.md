@@ -172,8 +172,10 @@ paypal-agentic-music-marketplace/
 > the seeded catalog. The public repository does not ship the production MySQL
 > catalog or copyrighted audio masters. Tables are created automatically on
 > backend startup (SQLite by default); run the seed script below to insert the
-> demo catalog and accounts so the PayPal checkout is testable locally. Redis is
-> required for Celery.
+> demo catalog and accounts. The default `.env.example` enables a local demo
+> checkout, so no PayPal account or credentials are required to evaluate the
+> full flow. Redis is optional for that demo path (downloads fall back to a
+> signed direct download when Redis is absent).
 
 ### 1. Clone & Configure Environment
 ```bash
@@ -182,22 +184,21 @@ cd paypal-agentic-music-marketplace
 cp .env.example .env
 ```
 
-Configure your PayPal and Google credentials in `.env`:
-```env
-# Live app (normal production checkout)
-PAYPAL_CLIENT_ID=your_live_client_id
-PAYPAL_CLIENT_SECRET=your_live_client_secret
-PAYPAL_MODE=live
+By default the copied `.env` leaves PayPal empty and enables the local demo
+checkout (`NEXT_PUBLIC_DEMO_CHECKOUT=1`, `ALLOW_DEMO_CHECKOUT=1`). In the
+checkout modal you will see **“Pagar en modo demo (sin cargo)”**, which records
+the purchase, the artist 85/15 split and the download without contacting PayPal.
 
-# Sandbox app (used by ?sandbox=1)
+To test the real PayPal Sandbox flow instead, fill these values and open the
+app with `?sandbox=1`:
+```env
 PAYPAL_SANDBOX_CLIENT_ID=your_sandbox_client_id
 PAYPAL_SANDBOX_CLIENT_SECRET=your_sandbox_client_secret
 NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID=your_sandbox_client_id
-NEXT_PUBLIC_PAYPAL_CLIENT_ID=your_live_client_id
-
-GOOGLE_CLIENT_ID=your_google_oauth_client_id
-GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
 ```
+
+For a real live checkout, also set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`,
+`PAYPAL_MODE=live` and `NEXT_PUBLIC_PAYPAL_CLIENT_ID`. Google OAuth is optional.
 
 ### 2. Start Backend (FastAPI)
 ```bash
@@ -219,9 +220,9 @@ falls back to when the API is empty), the `demojudge` / `demobuyer` /
 `demoartist` accounts (password `PayPalDemo2026!`) and the
 `billionaire-records-demo` artist profile used by the sandbox walkthrough.
 Without it, the UI shows mock tracks but `POST /api/ecommerce/paypal/create-order`
-returns `404 Recurso no encontrado`, so PayPal never opens. When `ffmpeg` is
-available the script also generates short demo audio under
-`backend/media_library/seed`.
+returns `404 Recurso no encontrado`, so checkout never opens. The script also
+generates short stereo-safe demo audio under `backend/media_library/seed` using
+the Python standard library (WAV), so `ffmpeg` is not required.
 
 The backend serves `/media-static` (and `/uploads`) itself, so audio playback
 works locally without nginx or any external media server.

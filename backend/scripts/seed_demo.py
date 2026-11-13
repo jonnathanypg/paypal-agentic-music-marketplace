@@ -20,11 +20,12 @@ The database is selected by ``DATABASE_URL`` (SQLite by default, see
 ``.env.example``). Tables are created automatically if missing.
 """
 
+import math
 import os
 import re
-import shutil
-import subprocess
+import struct
 import sys
+import wave
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -131,26 +132,30 @@ def _slugify(value: str) -> str:
 
 
 def _ensure_audio(track: dict) -> str:
-    """Return a catalog ``file_path``; generate a tiny MP3 when ffmpeg exists."""
+    """Return a catalog ``file_path`` and generate a short playable WAV.
+
+    Uses only the Python standard library so the demo audio works even when
+    ``ffmpeg`` is not installed on the judge's machine.
+    """
     seed_dir = Path(ROOT_DIR) / "media_library" / "seed"
-    filename = f"{track['id']}_{_slugify(track['title'])}.mp3"
+    filename = f"{track['id']}_{_slugify(track['title'])}.wav"
     target = seed_dir / filename
-    if not target.exists() and shutil.which("ffmpeg"):
-        try:
-            seed_dir.mkdir(parents=True, exist_ok=True)
-            frequency = 220 + (track["id"] * 55)
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"sine=frequency={frequency}:duration=3",
-                    "-q:a", "9", str(target),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+    if not target.exists():
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        sample_rate = 22050
+        duration = 3
+        total = sample_rate * duration
+        frequency = 220 + (track["id"] * 55)
+        frames = bytearray()
+        for i in range(total):
+            envelope = min(1.0, i / 800, (total - i) / 800)
+            value = int(0.25 * 32767 * envelope * math.sin(2 * math.pi * frequency * i / sample_rate))
+            frames += struct.pack("<h", value)
+        with wave.open(str(target), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            wav.writeframes(bytes(frames))
     return f"media_library/seed/{filename}"
 
 
@@ -185,6 +190,9 @@ def _upsert_track(db, track: dict):
         "genre": track.get("genre"),
         "duration_seconds": track.get("duration_seconds"),
         "creator": track.get("creator"),
+        # Attribute demo sales to the seeded demo label so the 85/15 artist
+        # ledger is populated when a judge buys any catalog item.
+        "creator_slug": ARTIST_SLUG,
         "album_art_path": track.get("album_art_path"),
         "description": track.get("description"),
         "is_public": True,

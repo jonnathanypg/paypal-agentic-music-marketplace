@@ -1,32 +1,29 @@
-# MediaSuite 2.0 — Backend Unificado (Optimizado para Python 3.14+)
-fastapi
-uvicorn[standard]
-python-dotenv
-pydantic
-PyJWT
-httpx
-celery[redis]
-redis
-openai
-google-generativeai
-groq
-tavily-python
-pydantic-settings
-requests
-pypdf
-motor
-python-multipart
-aiofiles
-slowapi
-langchain-openai
-langchain-community
-langchain-google-genai
-langchain-groq
-langgraph
-faster-whisper
-sqlalchemy
-pymysql
-cryptography
-mutagen
+# Minimal, self-contained backend dependencies for the public judge repo.
+# Heavy MediaSuite production packages (whisper, langchain, pinecone, etc.)
+# are intentionally excluded: the standalone marketplace does not import them
+# at startup or in the public checkout/streaming flow.
 
-langfuse==4.15.4
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-dotenv>=1.0
+pydantic[email]>=2.6
+PyJWT>=2.8
+httpx>=0.27
+SQLAlchemy>=2.0
+PyMySQL>=1.1
+cryptography>=42
+celery>=5.3
+redis>=5
+slowapi>=0.1.9
+python-multipart>=0.0.9
+
+# Optional AI/voice features used by the Saori chat endpoints.
+openai>=1.30
+groq>=0.9
+edge-tts>=6.1
+langchain-core>=0.3
+
+# Optional Google/YouTube OAuth endpoints.
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+requests>=2.31

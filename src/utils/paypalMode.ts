@@ -9,12 +9,6 @@
 
 const SANDBOX_STORAGE_KEY = "exito_sandbox_mode";
 
-// Kept only as a safety fallback so a missing NEXT_PUBLIC_PAYPAL_CLIENT_ID
-// does not break the existing production checkout. Sandbox never falls back
-// to this value.
-const LIVE_FALLBACK_CLIENT_ID =
-  "AUYxLqb4aKaVxE9Rd4l7ZmsmOD3EwFzCm5_qj9esAgDlvqUutzP5aomnhRFbWFg4s5vnJ14IOvMeY6in";
-
 export function peekSandboxMode(): boolean {
   if (typeof window === "undefined") return false;
 
@@ -43,7 +37,15 @@ export function getPayPalClientId(): string | null {
   if (isSandboxMode()) {
     return process.env.NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID || null;
   }
-  return process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID || LIVE_FALLBACK_CLIENT_ID;
+  return process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID || null;
+}
+
+/**
+ * Local/judge demo checkout. Enabled only when the build explicitly sets
+ * NEXT_PUBLIC_DEMO_CHECKOUT=1 (see .env.example); production never sets it.
+ */
+export function demoCheckoutEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_DEMO_CHECKOUT === "1";
 }
 
 export function getPayPalSdkUrl(): string | null {

@@ -153,12 +153,13 @@ pm2 restart ms-backend
 ## 5. Local development
 
 The hosted demo is the primary judge path. Local setup requires Python 3.11+,
-Node.js 20+, Redis (for Celery) and a database.
+Node.js 20+ and a database. Redis is optional: without it the demo checkout
+still works and downloads use a signed direct-download fallback.
 
 ```bash
 git clone https://github.com/jonnathanypg/paypal-agentic-music-marketplace.git
 cd paypal-agentic-music-marketplace
-cp .env.example .env             # add your sandbox credentials
+cp .env.example .env             # demo checkout enabled; add PayPal later if desired
 cp .env .env.production          # Next.js build-time variables
 
 # Backend
@@ -186,8 +187,12 @@ Notes:
   mock tracks but `POST /api/ecommerce/paypal/create-order` returns
   `404 Recurso no encontrado` and PayPal never opens.
 - The repository does not ship the production MySQL catalog or copyrighted
-  audio masters; the seed script uses metadata only (and a 3-second generated
-  tone when `ffmpeg` is available).
+  audio masters; the seed script generates 3-second WAV tones with the Python
+  standard library, so `ffmpeg` is not required.
+- The default `.env.example` enables the local demo checkout. Click **“Pagar en
+  modo demo (sin cargo)”** in the checkout modal to record a purchase, artist
+  split and download without PayPal credentials. Set `ALLOW_DEMO_CHECKOUT=0`
+  (and `NEXT_PUBLIC_DEMO_CHECKOUT=0`) to hide/disable it.
 - The backend mounts `/media-static` (from `backend/media_library`) and
   `/uploads` itself, plus `/api/covers`, so playback and cover generation work
   locally without nginx or any external service.

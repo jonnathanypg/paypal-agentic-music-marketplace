@@ -11,6 +11,7 @@ import re
 import uuid
 import datetime
 import hashlib
+import hmac
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr
@@ -24,6 +25,30 @@ from config import AUDIOBOOKS_OUTPUT, SHORTS_OUTPUT_VIDEOS, PLAYLIST_OUTPUT
 from lib.creator_registry import CREATOR_META, CREATOR_SLUGS, SLUG_TO_CREATOR
 
 router = APIRouter()
+
+# Judge/local demo checkout: records a purchase without contacting PayPal.
+# Disabled unless the deployment explicitly opts in (see .env.example).
+DEMO_CHECKOUT_ENABLED = os.getenv("ALLOW_DEMO_CHECKOUT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _session_user(request: Request, db: Session):
+    """Return the logged-in user from the session cookie, if any."""
+    token = request.cookies.get("mediasuite_session")
+    if not token:
+        return None
+    try:
+        from routers.auth import verify_token
+        payload = verify_token(token)
+        if not payload:
+            return None
+        return db.query(db_models.User).filter(db_models.User.username == payload.get("user")).first()
+    except Exception:
+        return None
+
+
+def _download_signature(purchase_id: int) -> str:
+    from config import SECRET_KEY
+    return hmac.new(SECRET_KEY.encode(), f"download:{purchase_id}".encode(), hashlib.sha256).hexdigest()
 
 
 def _creator_slug_for_name(creator_name: Optional[str]) -> Optional[str]:
@@ -81,8 +106,9 @@ def _capture_paypal_order(client, api_url: str, headers: dict, order_id: str,
         raise HTTPException(status_code=400, detail=f"La orden de PayPal no se completó: Estado={status}")
 
     capture = _extract_paypal_capture(capture_data)
+    purchase_unit = (capture_data.get("purchase_units") or [{}])[0]
     tx_id = capture.get("id") or f"PAY-{order_id}"
-    amount = capture.get("amount") or {}
+    amount = capture.get("amount") or purchase_unit.get("amount") or {}
     captured_value = amount.get("value")
     captured_currency = amount.get("currency_code", expected_currency)
     try:
@@ -90,12 +116,18 @@ def _capture_paypal_order(client, api_url: str, headers: dict, order_id: str,
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="PayPal no devolvió un monto capturado válido")
 
-    if captured_currency != expected_currency or abs(captured_float - float(expected_value)) > 0.01:
+    expected_amount = float(expected_value or 0)
+    # Only enforce an amount when the catalog actually defines a positive price.
+    # A missing/zero price must not turn a completed capture into a failed sale.
+    if expected_amount > 0 and (
+        captured_currency != expected_currency
+        or abs(captured_float - expected_amount) > 0.01
+    ):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Monto capturado (${captured_float:.2f} {captured_currency}) no coincide "
-                f"con el precio esperado (${float(expected_value):.2f} {expected_currency})"
+                f"con el precio esperado (${expected_amount:.2f} {expected_currency})"
             ),
         )
     return tx_id, capture_data
@@ -793,7 +825,7 @@ def make_purchase(req: PurchaseRequest, request: Request, response: Response = N
         tx_id = None
         try:
             # 1. Obtener Token de Acceso de PayPal
-            async_client = httpx.Client()
+            async_client = httpx
             token_res = async_client.post(
                 f"{api_url}/v1/oauth2/token",
                 auth=(paypal_client_id, paypal_client_secret),
@@ -916,6 +948,93 @@ def make_purchase(req: PurchaseRequest, request: Request, response: Response = N
         raise HTTPException(status_code=400, detail="Método de pago no soportado")
 
 
+@router.post("/demo/purchase")
+def demo_purchase(req: PurchaseRequest, request: Request, db: Session = Depends(get_db)):
+    """Judge/local-only purchase simulation: records the sale without PayPal.
+
+    Enabled by ``ALLOW_DEMO_CHECKOUT=1`` (see ``.env.example``). It never calls
+    PayPal nor charges money, so the purchase, library access, artist split and
+    download flow can be evaluated offline.
+    """
+    if not DEMO_CHECKOUT_ENABLED:
+        raise HTTPException(status_code=404, detail="Demo checkout is disabled on this server")
+
+    media_item = db.query(db_models.MediaCatalog).filter(db_models.MediaCatalog.id == req.media_catalog_id).first()
+    if not media_item:
+        raise HTTPException(status_code=404, detail="Recurso no encontrado en el catálogo")
+
+    user = _session_user(request, db)
+    buyer_email = req.guest_email if not user else user.email
+    if not buyer_email:
+        raise HTTPException(status_code=400, detail="Se requiere correo electrónico para la compra demo")
+
+    tx_id = f"DEMO-{uuid.uuid4().hex[:16].upper()}"
+    try:
+        purchase = db_models.Purchase(
+            user_id=user.id if user else None,
+            guest_email=encrypt_data(str(buyer_email)) if not user else None,
+            media_catalog_id=media_item.id,
+            payment_method="paypal",
+            amount_paid=media_item.price_usd or 0,
+            transaction_id=tx_id,
+        )
+        db.add(purchase)
+        db.commit()
+        db.refresh(purchase)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"No se pudo registrar la compra demo: {exc}")
+
+    artist_split = None
+    try:
+        from routers.artist_studio import record_artist_sale_and_split
+
+        split_override = None
+        if req.channel_slug:
+            channel_norm = re.sub(r"[^a-z0-9]", "", req.channel_slug.lower())
+            if "billionairerecords" in channel_norm:
+                channel_profile = db.query(db_models.ArtistProfile).filter(
+                    db_models.ArtistProfile.slug == req.channel_slug
+                ).first()
+                if channel_profile:
+                    split_override = channel_profile.slug
+
+        artist_split = record_artist_sale_and_split(
+            db=db,
+            media_item=media_item,
+            gross_amount_usd=float(media_item.price_usd or 0.99),
+            buyer_email=str(buyer_email),
+            purchase_id=purchase.id,
+            paypal_order_id=tx_id,
+            sale_channel="demo",
+            sandbox=True,
+            artist_slug_override=split_override,
+        )
+        db.add(db_models.UserRecommendationSignal(
+            user_id=user.id if user else None,
+            signal_type="purchase",
+            media_catalog_id=media_item.id,
+            extracted_genre=media_item.genre,
+            extracted_artist=media_item.creator or media_item.artist,
+            raw_query=f"Demo purchase: {media_item.title}",
+            weight=25.0,
+        ))
+        db.commit()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Demo purchase split failed: %s", exc)
+        db.rollback()
+
+    return {
+        "success": True,
+        "message": "Compra demo registrada (sin cargo real)",
+        "demo": True,
+        "purchase_id": purchase.id,
+        "transaction_id": tx_id,
+        "artist_split": artist_split,
+    }
+
+
 @router.post("/paypal/create-order")
 def create_paypal_order(req: PurchaseRequest, db: Session = Depends(get_db)):
     """
@@ -943,7 +1062,7 @@ def create_paypal_order(req: PurchaseRequest, db: Session = Depends(get_db)):
 
     try:
         # 1. Obtener token de acceso
-        async_client = httpx.Client()
+        async_client = httpx
         token_res = async_client.post(
             f"{api_url}/v1/oauth2/token",
             auth=(paypal_client_id, paypal_client_secret),
@@ -1001,21 +1120,48 @@ def generate_download_link(purchase_id: int, request: Request, db: Session = Dep
     purchase = db.query(db_models.Purchase).filter(db_models.Purchase.id == purchase_id).first()
     if not purchase:
         raise HTTPException(status_code=404, detail="Registro de compra no encontrado")
-        
-    # Verificar acceso (Si tiene cuenta, debe coincidir. Si es invitado, se valida por hash)
-    # Generar token de descarga temporal en Redis con expiración de 24 horas
-    import redis
-    from config import REDIS_URL
-    r = redis.from_url(REDIS_URL)
-    
-    download_token = uuid.uuid4().hex
-    # Guardamos los metadatos de compra en Redis con exp de 24 horas (86400 segundos)
-    r.setex(f"dl_token:{download_token}", 86400, str(purchase.id))
-    
-    return {
-        "success": True,
-        "download_url": f"/api/ecommerce/download/{download_token}"
-    }
+
+    # Preferred path: short-lived token in Redis (production DRM/watermark flow).
+    try:
+        import redis
+        from config import REDIS_URL
+        r = redis.from_url(REDIS_URL, socket_connect_timeout=0.5, socket_timeout=0.5)
+        r.ping()
+        download_token = uuid.uuid4().hex
+        r.setex(f"dl_token:{download_token}", 86400, str(purchase.id))
+        return {
+            "success": True,
+            "download_url": f"/api/ecommerce/download/{download_token}",
+        }
+    except Exception:
+        # Local/demo fallback when Redis is not running: signed direct download.
+        return {
+            "success": True,
+            "download_url": (
+                f"/api/ecommerce/download-direct/{purchase.id}"
+                f"?sig={_download_signature(purchase.id)}"
+            ),
+            "mode": "direct",
+        }
+
+
+@router.get("/download-direct/{purchase_id}")
+def download_direct(purchase_id: int, sig: str = "", db: Session = Depends(get_db)):
+    """Direct download fallback for local/demo runs without Redis."""
+    if not sig or not hmac.compare_digest(sig, _download_signature(purchase_id)):
+        raise HTTPException(status_code=403, detail="Firma de descarga inválida")
+    purchase = db.query(db_models.Purchase).filter(db_models.Purchase.id == purchase_id).first()
+    if not purchase:
+        raise HTTPException(status_code=404, detail="Registro de compra no encontrado")
+    media_item = purchase.media_item
+    if not media_item or not media_item.file_path:
+        raise HTTPException(status_code=404, detail="El recurso comprado no tiene archivo asociado")
+    from config import MEDIA_LIBRARY_DIR
+    relative = media_item.file_path.replace("media_library/", "", 1).replace("media_library\\", "", 1).lstrip("/\\")
+    file_path = os.path.join(str(MEDIA_LIBRARY_DIR), relative)
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Archivo no disponible en este entorno")
+    return FileResponse(file_path, filename=os.path.basename(file_path), media_type="application/octet-stream")
 
 @router.get("/download/{token}")
 def download_licensed_file(token: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -1188,7 +1334,7 @@ def subscribe_to_plan(req: SubscriptionRequest, request: Request, db: Session = 
         if not paypal_client_id or not paypal_client_secret:
             raise HTTPException(status_code=503, detail="PayPal credentials are not configured for this mode (live/sandbox).")
         try:
-            async_client = httpx.Client()
+            async_client = httpx
             token_res = async_client.post(
                 f"{api_url}/v1/oauth2/token",
                 auth=(paypal_client_id, paypal_client_secret),
@@ -1240,6 +1386,46 @@ def subscribe_to_plan(req: SubscriptionRequest, request: Request, db: Session = 
     }
 
 
+@router.post("/demo/subscribe")
+def demo_subscribe(req: SubscriptionRequest, request: Request, db: Session = Depends(get_db)):
+    """Activate a subscription locally without PayPal (judge demo only)."""
+    if not DEMO_CHECKOUT_ENABLED:
+        raise HTTPException(status_code=404, detail="Demo checkout is disabled on this server")
+    user = _session_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Inicia sesión con una cuenta demo para probar la suscripción")
+    plan = SUBSCRIPTION_PLANS.get(req.plan_name)
+    if not plan:
+        raise HTTPException(status_code=400, detail=f"Plan '{req.plan_name}' no existe")
+
+    now = datetime.datetime.utcnow()
+    old_sub = db.query(db_models.Subscription).filter(
+        db_models.Subscription.user_id == user.id,
+        db_models.Subscription.status == "active",
+    ).first()
+    if old_sub:
+        old_sub.status = "cancelled"
+    db.add(db_models.Subscription(
+        user_id=user.id,
+        plan_name=plan["name"],
+        tokens_per_month=plan["tokens_per_month"],
+        file_types_allowed=",".join(plan["file_types"]),
+        status="active",
+        current_period_end=now + datetime.timedelta(days=30),
+    ))
+    user.tokens_balance += plan["tokens_per_month"]
+    db.commit()
+    return {
+        "success": True,
+        "message": "Suscripción demo activada (sin cargo real)",
+        "demo": True,
+        "plan": plan["name"],
+        "tokens_granted": plan["tokens_per_month"],
+        "new_balance": user.tokens_balance,
+        "transaction_id": f"DEMO-SUB-{uuid.uuid4().hex[:12].upper()}",
+    }
+
+
 @router.post("/paypal/create-subscription-order")
 def create_subscription_paypal_order(req: SubscriptionRequest, db: Session = Depends(get_db)):
     """Crea una orden de PayPal para un plan de suscripción."""
@@ -1258,7 +1444,7 @@ def create_subscription_paypal_order(req: SubscriptionRequest, db: Session = Dep
         return {"success": True, "order_id": f"MOCK_ORD_{uuid.uuid4().hex[:12].upper()}", "plan": plan["name"], "amount": plan["price_usd"], "mode": "mock"}
 
     try:
-        async_client = httpx.Client()
+        async_client = httpx
         token_res = async_client.post(
             f"{api_url}/v1/oauth2/token",
             auth=(paypal_client_id, paypal_client_secret),

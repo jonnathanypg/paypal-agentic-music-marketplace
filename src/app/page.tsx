@@ -27,6 +27,7 @@ import musicLoadingAnimation from "../../public/lotties/music-loading.json";
 import navigationAnimation from "../../public/lotties/Navegation-Creator-music.json";
 import ExitoLogo, { ExitoLogoIcon } from "@/components/ExitoLogo";
 import { getPayPalSdkUrl, sandboxModePayload } from "@/utils/paypalMode";
+import DemoCheckoutButton from "@/components/DemoCheckoutButton";
 
 
 // ─── Tipos ────────────────────────────────────────────────────────────────
@@ -235,6 +236,7 @@ function PayPalButtonWrapper({
 
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
+    if (!getPayPalSdkUrl()) return;
 
     const renderPayPal = () => {
       const win = window as any;
@@ -771,7 +773,7 @@ export default function StreamPortal() {
     if (!checkoutItem) return;
     const sdkUrl = getPayPalSdkUrl();
     if (!sdkUrl) {
-      alert("Sandbox demo mode is enabled, but NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID is not configured on this build.");
+      console.warn("PayPal is not configured on this build; use the local demo checkout button.");
       return;
     }
     const existing = document.getElementById("paypal-sdk-script") as HTMLScriptElement | null;
@@ -2499,6 +2501,19 @@ export default function StreamPortal() {
                     setProcessing={setProcessing}
                     processing={processing}
                     checkoutPlan={checkoutPlan}
+                  />
+
+                  <DemoCheckoutButton
+                    checkoutItem={checkoutItem}
+                    guestEmail={guestEmail}
+                    guestUsername={guestUsername}
+                    guestPassword={guestPassword}
+                    autoRegister={autoRegister}
+                    isAuthenticated={userInfo.authenticated}
+                    planName={checkoutPlan}
+                    onSuccess={(data: any) => setPurchaseSuccess(data)}
+                    setProcessing={setProcessing}
+                    processing={processing}
                   />
 
                   {/* Back */}

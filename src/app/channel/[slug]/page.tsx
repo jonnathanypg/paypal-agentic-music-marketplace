@@ -24,6 +24,7 @@ import Link from "next/link";
 const Lottie = dynamic(() => import("lottie-react"), { ssr: false });
 import musicLoadingAnimation from "../../../../public/lotties/music-loading.json";
 import { getPayPalSdkUrl, sandboxModePayload, withSandboxQuery } from "@/utils/paypalMode";
+import DemoCheckoutButton from "@/components/DemoCheckoutButton";
 
 // ─── PayPal Button Wrapper (Real SDK integration) ───────────────────────────
 interface PayPalButtonWrapperProps {
@@ -57,6 +58,7 @@ function PayPalButtonWrapper({
 
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
+    if (!getPayPalSdkUrl()) return;
 
     const renderPayPal = () => {
       const win = window as any;
@@ -1435,6 +1437,18 @@ export default function CreatorChannelPage({
                     <PayPalButtonWrapper 
                       key={paymentSubMethod}
                       fundingType={paymentSubMethod}
+                      checkoutItem={checkoutItem}
+                      guestEmail={guestEmail}
+                      guestUsername={guestUsername}
+                      guestPassword={guestPassword}
+                      autoRegister={autoRegister}
+                      isAuthenticated={userInfo.authenticated}
+                      channelSlug={slug}
+                      onSuccess={(data: any) => setPurchaseSuccess(data)}
+                      setProcessing={setProcessing}
+                      processing={processing}
+                    />
+                    <DemoCheckoutButton
                       checkoutItem={checkoutItem}
                       guestEmail={guestEmail}
                       guestUsername={guestUsername}
