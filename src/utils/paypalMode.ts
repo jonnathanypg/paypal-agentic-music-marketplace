@@ -42,10 +42,13 @@ export function getPayPalClientId(): string | null {
 
 /**
  * Local/judge demo checkout. Enabled only when the build explicitly sets
- * NEXT_PUBLIC_DEMO_CHECKOUT=1 (see .env.example); production never sets it.
+ * NEXT_PUBLIC_DEMO_CHECKOUT=1 (see .env.example) AND no PayPal Client ID is
+ * configured for the active mode. As soon as real credentials are provided,
+ * the real PayPal button takes precedence and this fallback disappears.
  */
 export function demoCheckoutEnabled(): boolean {
-  return process.env.NEXT_PUBLIC_DEMO_CHECKOUT === "1";
+  if (process.env.NEXT_PUBLIC_DEMO_CHECKOUT !== "1") return false;
+  return !getPayPalClientId();
 }
 
 export function getPayPalSdkUrl(): string | null {

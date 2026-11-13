@@ -184,18 +184,25 @@ cd paypal-agentic-music-marketplace
 cp .env.example .env
 ```
 
-By default the copied `.env` leaves PayPal empty and enables the local demo
-checkout (`NEXT_PUBLIC_DEMO_CHECKOUT=1`, `ALLOW_DEMO_CHECKOUT=1`). In the
-checkout modal you will see **“Pagar en modo demo (sin cargo)”**, which records
-the purchase, the artist 85/15 split and the download without contacting PayPal.
+The real PayPal integration is the primary checkout. The local demo is only a
+fallback for offline judging when no PayPal credentials are available. By
+default the copied `.env` leaves PayPal empty and enables that fallback
+(`NEXT_PUBLIC_DEMO_CHECKOUT=1`, `ALLOW_DEMO_CHECKOUT=1`); in the checkout modal
+you will see **“Pagar en modo demo (sin cargo)”**, which records the purchase,
+the artist 85/15 split and the download without contacting PayPal.
 
-To test the real PayPal Sandbox flow instead, fill these values and open the
-app with `?sandbox=1`:
+To use the real PayPal Sandbox flow, fill these values and open the app with
+`?sandbox=1`:
 ```env
 PAYPAL_SANDBOX_CLIENT_ID=your_sandbox_client_id
 PAYPAL_SANDBOX_CLIENT_SECRET=your_sandbox_client_secret
 NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID=your_sandbox_client_id
 ```
+
+As soon as a PayPal Client ID is configured, the demo button is hidden
+automatically and the real PayPal button takes over; no extra flag is needed.
+The demo is shown only when `NEXT_PUBLIC_DEMO_CHECKOUT=1` **and** the active
+mode has no Client ID.
 
 For a real live checkout, also set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`,
 `PAYPAL_MODE=live` and `NEXT_PUBLIC_PAYPAL_CLIENT_ID`. Google OAuth is optional.
