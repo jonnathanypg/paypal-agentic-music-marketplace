@@ -168,6 +168,9 @@ source venv/bin/activate
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
 
+# Seed the demo catalog + accounts (same terminal, idempotent)
+python scripts/seed_demo.py
+
 # Frontend (new terminal, repository root)
 npm install
 npm run dev
@@ -176,9 +179,15 @@ npm run dev
 Notes:
 
 - `backend/celery_app.py` is included so the e-commerce router imports cleanly.
+- Tables are created automatically on backend startup. `backend/scripts/seed_demo.py`
+  inserts the demo catalog (ids 1..6), the `demojudge` / `demobuyer` /
+  `demoartist` accounts (`PayPalDemo2026!`) and the
+  `billionaire-records-demo` artist profile. Without it, the UI falls back to
+  mock tracks but `POST /api/ecommerce/paypal/create-order` returns
+  `404 Recurso no encontrado` and PayPal never opens.
 - The repository does not ship the production MySQL catalog or copyrighted
-  audio masters. Use the hosted demo for the seeded catalog; local instances
-  start empty and can be populated from the Artist Studio upload flow.
+  audio masters; the seed script uses metadata only (and a 3-second generated
+  tone when `ffmpeg` is available).
 - Local sandbox checkout requires `PAYPAL_SANDBOX_CLIENT_ID` /
   `PAYPAL_SANDBOX_CLIENT_SECRET` on the backend and
   `NEXT_PUBLIC_PAYPAL_SANDBOX_CLIENT_ID` at build time.

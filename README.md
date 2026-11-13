@@ -170,8 +170,10 @@ paypal-agentic-music-marketplace/
 
 > The hosted demo at `https://exito.cyou` is the primary judge path and includes
 > the seeded catalog. The public repository does not ship the production MySQL
-> catalog or copyrighted audio masters; a local instance starts empty and can be
-> populated from the Artist Studio upload flow. Redis is required for Celery.
+> catalog or copyrighted audio masters. Tables are created automatically on
+> backend startup (SQLite by default); run the seed script below to insert the
+> demo catalog and accounts so the PayPal checkout is testable locally. Redis is
+> required for Celery.
 
 ### 1. Clone & Configure Environment
 ```bash
@@ -206,7 +208,20 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3. Start Frontend (Next.js)
+### 3. Seed Demo Catalog & Accounts (recommended for local checkout)
+```bash
+# with the backend virtualenv still active, from backend/
+python scripts/seed_demo.py
+```
+
+This idempotent script creates the demo catalog (the same ids/prices the UI
+falls back to when the API is empty), the `demojudge` / `demobuyer` /
+`demoartist` accounts (password `PayPalDemo2026!`) and the
+`billionaire-records-demo` artist profile used by the sandbox walkthrough.
+Without it, the UI shows mock tracks but `POST /api/ecommerce/paypal/create-order`
+returns `404 Recurso no encontrado`, so PayPal never opens.
+
+### 4. Start Frontend (Next.js)
 ```bash
 npm install
 npm run dev

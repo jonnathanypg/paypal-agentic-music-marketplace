@@ -311,14 +311,23 @@ function PayPalButtonWrapper({
                 ...sandboxModePayload()
               })
             });
-            const result = await res.json();
+            const raw = await res.text();
+            let result: any = {};
+            try {
+              result = raw ? JSON.parse(raw) : {};
+            } catch {
+              result = {};
+            }
             if (res.ok && result.success) {
               onSuccess(result);
             } else {
-              alert(`Fallo al capturar pago: ${result.detail || "Intente de nuevo"}`);
+              const detail = result.detail
+                || (raw && !raw.trim().startsWith("<") ? raw : "")
+                || "Intente de nuevo";
+              alert(`Fallo al capturar pago (HTTP ${res.status}): ${detail}`);
             }
           } catch {
-            alert("Error de conexión al confirmar pago");
+            alert("No se pudo conectar con el servidor para confirmar el pago. Revisa tu conexión e inténtalo de nuevo.");
           } finally {
             setProcessing(false);
           }

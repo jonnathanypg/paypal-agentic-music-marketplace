@@ -31,6 +31,75 @@ def _creator_slug_for_name(creator_name: Optional[str]) -> Optional[str]:
         return None
     return CREATOR_SLUGS.get(creator_name)
 
+
+def _extract_paypal_capture(capture_data: dict) -> dict:
+    """Devuelve el primer capture de una orden PayPal v2."""
+    payments = (capture_data.get("purchase_units") or [{}])[0].get("payments") or {}
+    captures = payments.get("captures") or []
+    return captures[0] if captures else {}
+
+
+def _capture_paypal_order(client, api_url: str, headers: dict, order_id: str,
+                          expected_value: float, expected_currency: str = "USD"):
+    """Captura una orden PayPal de forma idempotente.
+
+    Devuelve ``(tx_id, capture_data)``. Si la orden ya fue capturada (por
+    ejemplo, un reintento tras fallar la persistencia en BD) se recupera su
+    estado en lugar de fallar, evitando que el comprador quede sin acceso
+    después de haber sido cobrado.
+    """
+    capture_res = client.post(
+        f"{api_url}/v2/checkout/orders/{order_id}/capture",
+        headers=headers,
+        json={},
+        timeout=15.0,
+    )
+    capture_data = None
+    if capture_res.status_code in (200, 201):
+        capture_data = capture_res.json()
+    else:
+        err_body = {}
+        try:
+            err_body = capture_res.json()
+        except Exception:
+            pass
+        issues = {d.get("issue") for d in (err_body.get("details") or []) if d.get("issue")}
+        if capture_res.status_code in (409, 422) or "ORDER_ALREADY_CAPTURED" in issues:
+            get_res = client.get(
+                f"{api_url}/v2/checkout/orders/{order_id}",
+                headers=headers,
+                timeout=15.0,
+            )
+            if get_res.status_code == 200:
+                capture_data = get_res.json()
+        if capture_data is None:
+            detail_msg = err_body.get("message") or "Error al capturar la orden"
+            raise HTTPException(status_code=400, detail=f"Fallo en captura de PayPal: {detail_msg}")
+
+    status = capture_data.get("status")
+    if status != "COMPLETED":
+        raise HTTPException(status_code=400, detail=f"La orden de PayPal no se completó: Estado={status}")
+
+    capture = _extract_paypal_capture(capture_data)
+    tx_id = capture.get("id") or f"PAY-{order_id}"
+    amount = capture.get("amount") or {}
+    captured_value = amount.get("value")
+    captured_currency = amount.get("currency_code", expected_currency)
+    try:
+        captured_float = float(captured_value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="PayPal no devolvió un monto capturado válido")
+
+    if captured_currency != expected_currency or abs(captured_float - float(expected_value)) > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Monto capturado (${captured_float:.2f} {captured_currency}) no coincide "
+                f"con el precio esperado (${float(expected_value):.2f} {expected_currency})"
+            ),
+        )
+    return tx_id, capture_data
+
 # ══════════════════════════════════════════════════════════════
 #  SCHEMAS DE ENTRADA Y SALIDA
 # ══════════════════════════════════════════════════════════════
@@ -731,69 +800,65 @@ def make_purchase(req: PurchaseRequest, request: Request, response: Response = N
                 data={"grant_type": "client_credentials"},
                 timeout=15.0
             )
-            if token_res.status_code == 200:
-                access_token = token_res.json().get("access_token")
-
-                # 2. Capturar Pago de la Orden de PayPal
-                headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json"
-                }
-                capture_res = async_client.post(
-                    f"{api_url}/v2/checkout/orders/{req.order_id}/capture",
-                    headers=headers,
-                    json={},
-                    timeout=15.0
-                )
-
-                if capture_res.status_code in [200, 201]:
-                    capture_data = capture_res.json()
-                    status = capture_data.get("status")
-                    if status == "COMPLETED":
-                        # Pago capturado con éxito
-                        payments = capture_data.get("purchase_units", [{}])[0].get("payments", {})
-                        captures = payments.get("captures", [{}])
-                        capture = captures[0] if captures else {}
-                        tx_id = capture.get("id") or f"PAY-{req.order_id}"
-
-                        # 3. Verificar que el monto y la moneda capturados coincidan con el catálogo
-                        captured_value = capture.get("amount", {}).get("value")
-                        captured_currency = capture.get("amount", {}).get("currency_code", "USD")
-                        expected_value = float(media_item.price_usd or 0)
-                        try:
-                            captured_float = float(captured_value)
-                        except (TypeError, ValueError):
-                            raise HTTPException(status_code=400, detail="PayPal no devolvió un monto capturado válido")
-                        if captured_currency != "USD" or abs(captured_float - expected_value) > 0.01:
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"Monto capturado (${captured_float:.2f} {captured_currency}) no coincide con el precio del track (${expected_value:.2f} USD)",
-                            )
-                    else:
-                        raise HTTPException(status_code=400, detail=f"La orden de PayPal no se completó: Estado={status}")
-                else:
-                    detail_msg = capture_res.json().get("message", "Error al capturar la orden")
-                    raise HTTPException(status_code=400, detail=f"Fallo en captura de PayPal: {detail_msg}")
-            else:
+            if token_res.status_code != 200:
                 raise HTTPException(status_code=500, detail="No se pudo autenticar con PayPal API")
+
+            access_token = token_res.json().get("access_token")
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+
+            # 2. Capturar pago (idempotente: recupera órdenes ya capturadas)
+            tx_id, _capture_data = _capture_paypal_order(
+                async_client,
+                api_url,
+                headers,
+                req.order_id,
+                expected_value=float(media_item.price_usd or 0),
+                expected_currency="USD",
+            )
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"Error de red con pasarela de PayPal: {str(e)}")
 
-        purchase = db_models.Purchase(
-            user_id=user.id if user else None,
-            guest_email=encrypt_data(str(buyer_email)) if not user else None, # Cifrado ZK para invitados
-            media_catalog_id=media_item.id,
-            payment_method="paypal",
-            amount_paid=media_item.price_usd,
-            transaction_id=tx_id
-        )
-        db.add(purchase)
-        db.commit()
-        db.refresh(purchase)
+        # 3. Persistir la compra de forma idempotente. Si el pago ya se había
+        # capturado en un intento anterior, se reutiliza el registro existente.
+        purchase = db.query(db_models.Purchase).filter(
+            db_models.Purchase.transaction_id == tx_id
+        ).first()
+        is_new_purchase = purchase is None
+        if is_new_purchase:
+            try:
+                purchase = db_models.Purchase(
+                    user_id=user.id if user else None,
+                    guest_email=encrypt_data(str(buyer_email)) if not user else None, # Cifrado ZK para invitados
+                    media_catalog_id=media_item.id,
+                    payment_method="paypal",
+                    amount_paid=media_item.price_usd,
+                    transaction_id=tx_id
+                )
+                db.add(purchase)
+                db.commit()
+                db.refresh(purchase)
+            except Exception as db_err:
+                db.rollback()
+                import logging
+                logging.getLogger(__name__).error(
+                    "Pago PayPal %s capturado pero no se pudo registrar en BD: %s", tx_id, db_err
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"El pago fue capturado en PayPal (transacción {tx_id}) pero no se pudo "
+                        "registrar la compra. No vuelvas a pagar: contacta a soporte con este código."
+                    ),
+                )
 
         # ── Acreditar ganancia neta al Artista y aplicar regla de retiro PayPal (Marketplace Split) ──
         artist_split = None
         try:
+            if not is_new_purchase:
+                raise RuntimeError("purchase_already_recorded")
             from routers.artist_studio import record_artist_sale_and_split
 
             # Sandbox-only demo attribution: when a judge buys from the demo
@@ -834,8 +899,9 @@ def make_purchase(req: PurchaseRequest, request: Request, response: Response = N
             db.add(sig)
             db.commit()
         except Exception as split_err:
-            import logging
-            logging.getLogger(__name__).warning(f"No se pudo registrar artist_split: {split_err}")
+            if str(split_err) != "purchase_already_recorded":
+                import logging
+                logging.getLogger(__name__).warning(f"No se pudo registrar artist_split: {split_err}")
 
         return {
             "success": True,
@@ -1129,34 +1195,19 @@ def subscribe_to_plan(req: SubscriptionRequest, request: Request, db: Session = 
                 data={"grant_type": "client_credentials"},
                 timeout=15.0
             )
-            if token_res.status_code == 200:
-                access_token = token_res.json().get("access_token")
-                headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-                capture_res = async_client.post(
-                    f"{api_url}/v2/checkout/orders/{req.order_id}/capture",
-                    headers=headers, json={}, timeout=15.0
-                )
-                if capture_res.status_code in [200, 201]:
-                    capture_data = capture_res.json()
-                    if capture_data.get("status") == "COMPLETED":
-                        payments = capture_data.get("purchase_units", [{}])[0].get("payments", {})
-                        captures = payments.get("captures", [{}])
-                        capture = captures[0] if captures else {}
-                        tx_id = capture.get("id") or f"PAY-{req.order_id}"
-                        captured_value = capture.get("amount", {}).get("value")
-                        captured_currency = capture.get("amount", {}).get("currency_code", "USD")
-                        try:
-                            captured_float = float(captured_value)
-                        except (TypeError, ValueError):
-                            raise HTTPException(status_code=400, detail="PayPal no devolvió un monto capturado válido")
-                        if captured_currency != "USD" or abs(captured_float - float(plan["price_usd"])) > 0.01:
-                            raise HTTPException(status_code=400, detail="El monto capturado no coincide con el precio del plan")
-                    else:
-                        raise HTTPException(status_code=400, detail=f"PayPal no completó el pago: {capture_data.get('status')}")
-                else:
-                    raise HTTPException(status_code=400, detail="Error capturando pago PayPal")
-            else:
+            if token_res.status_code != 200:
                 raise HTTPException(status_code=500, detail="No se pudo autenticar con PayPal API")
+
+            access_token = token_res.json().get("access_token")
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            tx_id, _capture_data = _capture_paypal_order(
+                async_client,
+                api_url,
+                headers,
+                req.order_id,
+                expected_value=float(plan["price_usd"]),
+                expected_currency="USD",
+            )
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"Error de red con PayPal: {str(e)}")
         if not tx_id:

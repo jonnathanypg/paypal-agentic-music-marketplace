@@ -203,7 +203,10 @@ class Purchase(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # NULL para compras Guest
-    guest_email = Column(String(120), nullable=True)
+    # Almacena el email de invitado CIFRADO con Fernet (token base64). Un email
+    # valido puede producir tokens de hasta ~420 caracteres, por lo que 120 era
+    # insuficiente y provocaba DataError 1406 en MySQL en checkouts de invitado.
+    guest_email = Column(String(512), nullable=True)
     media_catalog_id = Column(Integer, ForeignKey("media_catalog.id"), nullable=False)
     payment_method = Column(Enum("paypal", "tokens", "stripe", name="payment_methods"), nullable=False)
     transaction_id = Column(String(100), unique=True, nullable=True, index=True)
